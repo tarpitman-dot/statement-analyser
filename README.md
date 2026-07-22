@@ -68,11 +68,11 @@ Aliases live in `src/lib/columnAliases.ts`. The required fields are Artist, Albu
 Releases are grouped by this priority:
 
 1. Barcode
-2. Catalog No
-3. Release Code
-4. Artist plus Album Title
+2. Catalog No, only when Barcode is blank
+3. Release Code, only when Barcode and Catalog No are blank
+4. Artist plus Album Title, only as the final fallback
 
-This prevents unrelated releases with the same title being merged unless no stronger identifier is present.
+Rows with the same populated Barcode stay in one release group even when Catalog No, Release Code, or release-title wording differs. Release-summary exports use the complete grouped release data, not visible-page, preview, or chart subsets.
 
 ## Track grouping
 
