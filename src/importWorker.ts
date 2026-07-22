@@ -1,2 +1,50 @@
-import { parseArrayBuffer } from './lib/parser';
-self.onmessage=async(e:MessageEvent)=>{const {buffer,filename,fileSize}=e.data;try{const data=await parseArrayBuffer(buffer,filename,fileSize,{onProgress:p=>(self as any).postMessage({type:'progress',progress:p})});(self as any).postMessage({type:'complete',data});}catch(error){(self as any).postMessage({type:'error',error:{message:error instanceof Error?error.message:'This statement could not be fully processed.',details:error instanceof Error?error.stack:String(error)}})}};
+import { CONSERVATIVE_SHEETJS_READ_OPTIONS, parseArrayBuffer } from './lib/parser';
+import { serialiseThrown, technicalDetails, type ImportDebugContext } from './lib/importDiagnostics';
+
+function postError(error: unknown, context: ImportDebugContext) {
+  const serialised = serialiseThrown(error);
+  (self as unknown as Worker).postMessage({
+    type: 'error',
+    error: {
+      name: serialised.name,
+      message: serialised.message || 'This statement could not be fully processed.',
+      stack: serialised.stack,
+      details: technicalDetails(context, error),
+      context,
+    },
+  });
+}
+
+self.onmessage = async (e: MessageEvent) => {
+  const { buffer, filename, fileSize, arrayBufferSizeBeforeTransfer, fileReadMs } = e.data;
+  const base = {
+    processingStage: 'Opening workbook',
+    workerEvent: 'parse-start',
+    workbookFilename: filename ?? 'Unknown',
+    fileSize: Number(fileSize ?? 0),
+    arrayBufferSizeBeforeTransfer: Number(arrayBufferSizeBeforeTransfer ?? 0),
+    arrayBufferSizeInsideWorker: buffer?.byteLength ?? 0,
+  };
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+    postError(new Error('Worker received an empty or invalid ArrayBuffer.'), { ...base, sheetJsReadAttempt: 'not attempted', retryAttemptNumber: 0 });
+    return;
+  }
+  for (const attempt of [1, 2]) {
+    try {
+      const data = await parseArrayBuffer(buffer.slice(0), filename, fileSize, {
+        fileReadMs,
+        sheetJsReadAttempt: attempt === 1 ? 'default' : 'conservative',
+        retryAttemptNumber: attempt,
+        readOptions: attempt === 1 ? undefined : CONSERVATIVE_SHEETJS_READ_OPTIONS,
+        onProgress: p => (self as unknown as Worker).postMessage({ type: 'progress', progress: p, context: { ...base, sheetJsReadAttempt: attempt === 1 ? 'default' : 'conservative', retryAttemptNumber: attempt } }),
+      });
+      (self as unknown as Worker).postMessage({ type: 'complete', data, context: { ...base, processingStage: 'Complete', workerEvent: 'complete', sheetJsReadAttempt: attempt === 1 ? 'default' : 'conservative', retryAttemptNumber: attempt } });
+      return;
+    } catch (error) {
+      if (attempt === 2) {
+        postError(error, { ...base, workerEvent: 'error', sheetJsReadAttempt: 'conservative', retryAttemptNumber: 2 });
+        return;
+      }
+    }
+  }
+};
