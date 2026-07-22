@@ -1,0 +1,2 @@
+import { parseArrayBuffer } from './lib/parser';
+self.onmessage=async(e:MessageEvent)=>{const {buffer,filename,fileSize}=e.data;try{const data=await parseArrayBuffer(buffer,filename,fileSize,{onProgress:p=>(self as any).postMessage({type:'progress',progress:p})});(self as any).postMessage({type:'complete',data});}catch(error){(self as any).postMessage({type:'error',error:{message:error instanceof Error?error.message:'This statement could not be fully processed.',details:error instanceof Error?error.stack:String(error)}})}};
