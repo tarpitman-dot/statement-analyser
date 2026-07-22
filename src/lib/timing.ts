@@ -1,0 +1,6 @@
+import type {ImportDiagnostics, ImportTimings} from './types';
+
+export function safeNow(){try{return typeof performance!=='undefined'&&typeof performance.now==='function'?performance.now():Date.now()}catch{return 0}}
+export function ensureImportTimings(diagnostics?:Partial<ImportDiagnostics>|null):ImportTimings{const d=diagnostics as ImportDiagnostics|undefined;if(!d)return {tabFirstCalculationMs:{},searchIndexMs:{}};d.importTimings={...(d.importTimings??{}),tabFirstCalculationMs:{...(d.importTimings?.tabFirstCalculationMs??{})},searchIndexMs:{...(d.importTimings?.searchIndexMs??{})}};return d.importTimings}
+export function recordTiming(diagnostics:Partial<ImportDiagnostics>|null|undefined,category:'tabFirstCalculationMs'|'searchIndexMs',name:string,ms:number){try{const timings=ensureImportTimings(diagnostics);timings[category]={...(timings[category]??{}),[name]:Number.isFinite(ms)?ms:0}}catch{/* optional diagnostics must never affect rendering */}}
+export function recordTimingValue(diagnostics:Partial<ImportDiagnostics>|null|undefined,key:keyof ImportTimings,ms:number){try{const timings=ensureImportTimings(diagnostics);(timings as any)[key]=Number.isFinite(ms)?ms:0}catch{/* optional diagnostics must never affect rendering */}}
