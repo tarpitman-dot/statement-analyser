@@ -1,6 +1,6 @@
 # Cargo Statement Analyser
 
-A standalone React, TypeScript and Vite static web application for record labels that receive sales and royalty statements exported from the Details reporting platform.
+A standalone React, TypeScript and Vite static web application for record labels that receive digital sales and royalty statements.
 
 ## Privacy model
 
@@ -14,9 +14,9 @@ Do not commit real commercial statements to this repository.
 - `.xls`
 - `.csv`
 
-## Known supported Details format
+## Known supported digital statement format
 
-The first version supports the Details digital sales statement structure with a worksheet such as `Digital Sales` and columns including Artist, Album Title, Title, Amount, Royalty Amount, sales/usage fields, release identifiers, shops, countries, sales periods, deductions, line charges, and royalty rates.
+The first version supports a detailed digital sales statement structure with a worksheet such as `Digital Sales` and columns including Artist, Album Title, Title, Amount, Royalty Amount, sales/usage fields, release identifiers, shops, countries, sales periods, deductions, line charges, and royalty rates.
 
 The parser detects the header row in the first 30 rows, ignores blank worksheets and blank rows, preserves Source Sheet and Source Row, and keeps identifiers such as catalogue numbers and barcodes as text.
 
