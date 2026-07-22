@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+.env*
+*.local
+.DS_Store
+# Never commit real commercial statement exports
+*.xlsx
+*.xls
+!src/test/fixtures/*.csv
