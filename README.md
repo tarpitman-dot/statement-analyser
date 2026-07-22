@@ -1,4 +1,4 @@
-# Details Statement Analyser
+# Cargo Statement Analyser
 
 A standalone React, TypeScript and Vite static web application for record labels that receive sales and royalty statements exported from the Details reporting platform.
 
