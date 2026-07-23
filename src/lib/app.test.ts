@@ -1404,7 +1404,7 @@ describe('complete ZIP breakdown export', () => {
         '05-shops.csv',
         '06-countries.csv',
         '07-sales-periods.csv',
-        '08-usage-types.csv',
+        '08-usage-types-or-formats.csv',
         '09-full-detail.csv',
       ]),
     );
@@ -1420,7 +1420,7 @@ describe('complete ZIP breakdown export', () => {
         '05-shops.csv',
         '06-countries.csv',
         '07-sales-periods.csv',
-        '08-usage-types.csv',
+        '08-usage-types-or-formats.csv',
         '09-full-detail.csv',
       ]),
     );
