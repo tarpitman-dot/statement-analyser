@@ -1636,3 +1636,118 @@ describe('large XLSX converter workflow', () => {
     expect(groupedReconciliation(data.rows, groupArtists(data.rows)).reconciled).toBe(true);
   });
 });
+
+class FakeConverterXhr {
+  static instances: FakeConverterXhr[] = [];
+  upload: { onprogress: ((event: ProgressEvent) => void) | null; onload: (() => void) | null } = {
+    onprogress: null,
+    onload: null,
+  };
+  onreadystatechange: (() => void) | null = null;
+  onprogress: ((event: ProgressEvent) => void) | null = null;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  ontimeout: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  readyState = 0;
+  status = 0;
+  responseType = '';
+  response: Blob | null = null;
+  aborted = false;
+  requestHeaders: Record<string, string> = {};
+  constructor() {
+    FakeConverterXhr.instances.push(this);
+  }
+  open() {}
+  send() {}
+  abort() {
+    this.aborted = true;
+    this.onabort?.();
+  }
+  setRequestHeader(name: string, value: string) {
+    this.requestHeaders[name] = value;
+  }
+  getResponseHeader(name: string) {
+    return name.toLowerCase() === 'x-conversion-started' ? 'true' : null;
+  }
+}
+
+describe('large XLSX converter response timeout', () => {
+  it('uses response inactivity rather than a fixed wall-clock timeout for streaming downloads', async () => {
+    vi.useFakeTimers();
+    const originalXhr = globalThis.XMLHttpRequest;
+    FakeConverterXhr.instances = [];
+    vi.stubGlobal('XMLHttpRequest', FakeConverterXhr);
+    try {
+      const { uploadWorkbookWithProgress } = await import('./converterUpload');
+      const diagnostics: Record<string, unknown> = {};
+      const stages: string[] = [];
+      const promise = uploadWorkbookWithProgress({
+        file: new File(['xlsx'], 'large.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        }),
+        converterUrl: '/api/convert-xlsx',
+        activeConversion: { xhr: null },
+        diagnostics,
+        onProgress: (stage) => stages.push(stage),
+        uploadInactivityMs: 100,
+        responseInactivityMs: 100,
+      });
+      const xhr = FakeConverterXhr.instances[0];
+      xhr.upload.onprogress?.({ loaded: 4, total: 4, lengthComputable: true } as ProgressEvent);
+      xhr.upload.onload?.();
+      xhr.status = 200;
+      xhr.readyState = XMLHttpRequest.HEADERS_RECEIVED;
+      xhr.onreadystatechange?.();
+      for (let loaded = 1; loaded <= 5; loaded++) {
+        await vi.advanceTimersByTimeAsync(90);
+        xhr.onprogress?.({ loaded, total: 10, lengthComputable: true } as ProgressEvent);
+        expect(xhr.aborted).toBe(false);
+      }
+      xhr.response = new Blob(['converted,csv']);
+      xhr.onload?.();
+      await expect(promise).resolves.toBeUndefined();
+      expect(diagnostics.abortReason).toBeUndefined();
+      expect(diagnostics.responseSize).toBe(xhr.response.size);
+      expect(stages).toContain('Receiving converted data');
+    } finally {
+      vi.stubGlobal('XMLHttpRequest', originalXhr);
+      vi.useRealTimers();
+    }
+  });
+
+  it('aborts when a streaming response becomes inactive', async () => {
+    vi.useFakeTimers();
+    const originalXhr = globalThis.XMLHttpRequest;
+    FakeConverterXhr.instances = [];
+    vi.stubGlobal('XMLHttpRequest', FakeConverterXhr);
+    try {
+      const { uploadWorkbookWithProgress } = await import('./converterUpload');
+      const diagnostics: Record<string, unknown> = {};
+      const promise = uploadWorkbookWithProgress({
+        file: new File(['xlsx'], 'large.xlsx'),
+        converterUrl: '/api/convert-xlsx',
+        activeConversion: { xhr: null },
+        diagnostics,
+        onProgress: () => {},
+        uploadInactivityMs: 100,
+        responseInactivityMs: 100,
+      });
+      const rejection = expect(promise).rejects.toThrow('The converter response timed out.');
+      const xhr = FakeConverterXhr.instances[0];
+      xhr.upload.onprogress?.({ loaded: 4, total: 4, lengthComputable: true } as ProgressEvent);
+      xhr.upload.onload?.();
+      xhr.status = 200;
+      xhr.readyState = XMLHttpRequest.HEADERS_RECEIVED;
+      xhr.onreadystatechange?.();
+      xhr.onprogress?.({ loaded: 1, total: 10, lengthComputable: true } as ProgressEvent);
+      await vi.advanceTimersByTimeAsync(101);
+      await rejection;
+      expect(diagnostics.abortReason).toBe('converter-response-timeout');
+      expect(xhr.aborted).toBe(true);
+    } finally {
+      vi.stubGlobal('XMLHttpRequest', originalXhr);
+      vi.useRealTimers();
+    }
+  });
+});
