@@ -9,11 +9,115 @@ function Upload(p:{onFile:(f:File)=>void;onCompatibility:(f:File)=>void;onSample
 function formatBytes(size:number){return size>1024*1024?`${(size/1024/1024).toFixed(1)} MB`:`${(size/1024).toFixed(1)} KB`}
 export function Dashboard({data,remove}:{data:StatementData;remove:()=>void}){useEffect(()=>{if(!data.diagnostics.importTimings?.dashboardFirstRenderMs)recordTimingValue(data.diagnostics,'dashboardFirstRenderMs',safeNow())},[data]);const[tab,setTab]=useState('Overview');const[exportProgress,setExportProgress]=useState<ExportProgress|null>(null);const[exportError,setExportError]=useState('');async function zipExport(){setExportError('');setExportProgress({stage:'Validating totals',index:0,total:14});try{await downloadBreakdownsZip(data,setExportProgress)}catch(e){setExportError(e instanceof Error?e.message:String(e))}finally{setTimeout(()=>setExportProgress(null),1200)}}const[filters,setFilters]=useState<Record<string,string>>({});const[quick,setQuick]=useState<{field:keyof Transaction;q:string;exact?:boolean}|null>(null);const filtered=useMemo(()=>data.rows.filter(r=>Object.entries(filters).every(([k,v])=>!v||String((r as any)[k]).toLowerCase().includes(v.toLowerCase()))),[data,filters]);const isUnfiltered=!Object.values(filters).some(Boolean);const initial=data.diagnostics.initialSummary;const t=useMemo(()=>totals(filtered),[filtered]);const overviewCounts=useMemo(()=>isUnfiltered&&initial?{artists:initial.uniqueArtistCount,releases:initial.uniqueReleaseCount,tracks:initial.uniqueTrackCount}:overviewSummaryCounts(filtered),[filtered,isUnfiltered,initial]);const [cache,setCache]=useState<Record<string,any>>({});useEffect(()=>setCache({}),[filtered]);function getTabData(name:string,calc:()=>any){if(cache[name])return cache[name]; if(tab!==name&&name!=='Overview')return null; const st=safeNow(); const v=calc(); recordTiming(data.diagnostics,'tabFirstCalculationMs',name,safeNow()-st); setTimeout(()=>setCache(c=>c[name]?c:{...c,[name]:v}),0); return v;}const artists=getTabData('Artists',()=>groupArtists(filtered))??[];const releases=getTabData('Releases',()=>groupReleases(filtered))??[];const tracks=getTabData('Tracks',()=>groupTracks(filtered))??[];const shops=getTabData('Shops',()=>groupBy(filtered,'shop'));const countries=getTabData('Countries',()=>groupBy(filtered,'country'));const salesPeriods=getTabData('Sales Periods',()=>groupBy(filtered,'salesPeriod').sort((a,b)=>periodSortValue(a.salesPeriod).localeCompare(periodSortValue(b.salesPeriod))));const importChecks=getTabData('Import Checks',()=>importCheckGroups(filtered));const usageTypes=importChecks?.usageTypes;const royaltyRates=importChecks?.royaltyRates;const rates=useMemo(()=>isUnfiltered&&initial?{label:initial.royaltyRateSummary,rates:[]}:rateSummary(filtered),[filtered,isUnfiltered,initial]);const searchRowsSource=quick?filtered:EMPTY_ROWS;const searchIndexes=useProgressiveSearchIndexes(searchRowsSource,data.diagnostics,!!quick);const focused=quick?.q?(searchIndexes[String(quick.field)]?searchRows(filtered,quick.field,quick.q,quick.exact,searchIndexes):[]):[];return <main className="app"><header><div><h1>Cargo Statement Analyser</h1><p>Please upload your digital statement for summaries and analysis.</p><p><b>{data.label}</b> · {data.filename} {data.diagnostics.account&&`· Account: ${data.diagnostics.account}`} {data.diagnostics.reportingPeriod&&`· Reporting period: ${data.diagnostics.reportingPeriod}`}</p></div><button onClick={remove}>Remove statement</button></header><StatementHealth diagnostics={data.diagnostics} openChecks={()=>setTab('Import Checks')}/><section className="zip-export"><button className="primary" onClick={zipExport} disabled={!!exportProgress}>Download all breakdowns as ZIP</button>{exportProgress&&<p aria-live="polite">{exportProgress.stage} ({exportProgress.index}/{exportProgress.total})</p>}{exportError&&<p className="error">{exportError}</p>}</section><Filters filters={filters} setFilters={setFilters} rows={data.rows}/><Quick setQuick={setQuick}/>{quick&&(searchIndexes[String(quick.field)]?<Focused rows={focused} clear={()=>setQuick(null)}/>:<section className="focused"><button onClick={()=>setQuick(null)}>Clear selected result</button><p>Preparing search…</p></section>)}<section className="cards"><Card title="Your earnings" value={isUnfiltered&&initial?fmtMoney(initial.totalRoyaltyAmount):fmtMoney(t.royaltyAmount)}/><Card title="Revenue before your royalty rate" value={isUnfiltered&&initial?fmtMoney(initial.totalAmount):fmtMoney(t.amount)}/><Card title="Sales / usages" value={isUnfiltered&&initial?fmtInt(initial.totalSales):fmtInt(t.sales)}/><Card title="Deductions and line charges" value={isUnfiltered&&initial?fmtMoney(initial.totalDeductions):fmtMoney(t.deductions)}/><Card title="Transaction rows" value={String(filtered.length)}/><Card title="Releases" value={String(overviewCounts.releases)}/><Card title="Tracks" value={String(overviewCounts.tracks)}/><Card title="Artists" value={String(overviewCounts.artists)}/><Card title="Royalty rate" value={rates.label}/></section><nav>{tabs.map(x=><button className={tab===x?'active':''} onClick={()=>setTab(x)} key={x}>{x}</button>)}</nav>{tab==='Overview'&&<Overview rows={filtered} diagnostics={data.diagnostics}/>} {tab==='Artists'&&<Summary sourceRows={filtered} rows={artists} cols={['artist','royaltyAmount','amount','sales','releaseCount','trackCount','shopCount','countryCount','transactionRows']} name="artist summary"/>}{tab==='Releases'&&<Summary sourceRows={filtered} rows={releases} cols={['barcode','albumTitle','artist','catalogNumber','releaseCode','royaltyAmount','amount','sales','trackCount','transactionRows']} name="release summary"/>}{tab==='Tracks'&&<Summary sourceRows={trackRows(filtered)} rows={tracks} cols={['artist','trackTitle','isrc','albumTitle','catalogNumber','barcode','royaltyAmount','amount','sales','shopCount','countryCount','transactionRows']} name="track summary"/>}{tab==='Shops'&&(shops?<Summary sourceRows={filtered} rows={shops} cols={['shop','royaltyAmount','amount','sales','artistCount','releaseCount','trackCount','transactionRows']} name="shop summary"/>:<p className="note">Loading Shops…</p>)}{tab==='Countries'&&(countries?<Summary sourceRows={filtered} rows={countries} cols={['country','royaltyAmount','amount','sales','artistCount','releaseCount','trackCount','transactionRows']} name="country summary"/>:<p className="note">Loading Countries…</p>)}{tab==='Sales Periods'&&<><p className="note">Sales Period is when the underlying usage or sale occurred. It may be earlier than the statement reporting month.</p>{salesPeriods?<Summary sourceRows={filtered} rows={salesPeriods} cols={['salesPeriod','royaltyAmount','amount','sales','shopCount','countryCount','transactionRows']} name="sales-period summary"/>:<p className="note">Loading Sales Periods…</p>}</>}{tab==='Deductions'&&<Deductions rows={filtered}/>} {tab==='Full Detail'&&<Detail rows={filtered}/>} {tab==='Import Checks'&&(importChecks?<Checks data={data} filteredRows={filtered} groups={importChecks}/>:<p className="note">Preparing reconciliation checks…</p>)}</main>}
 
-const defaultStatementHealth={fileStatus:'Original statement appears intact',dataQuality:'Excellent',barcodeWarnings:0,rowsRequiringReview:0};
-function StatementHealth({diagnostics,openChecks}:{diagnostics:any;openChecks:()=>void}){const h={...defaultStatementHealth,...(diagnostics?.statementHealth??{})};return <section className="statement-health card"><h2>Statement Health</h2><p>{h.fileStatus}</p><p>Data Quality: <b>{h.dataQuality}</b></p><p>Barcode warnings: {h.barcodeWarnings}</p><p>Rows requiring review: {h.rowsRequiringReview}</p><button onClick={openChecks}>View data quality checks</button></section>}
-function Card(p:{title:string;value:string}){return <div className="card"><span>{p.title}</span><b>{p.value}</b></div>}
-function Filters({filters,setFilters,rows}:{filters:Record<string,string>;setFilters:(f:Record<string,string>)=>void;rows:Transaction[]}){const fields=[['artist','Artist'],['albumTitle','Release'],['trackTitle','Track'],['catalogNumber','Catalogue number'],['barcode','Barcode'],['isrc','ISRC'],['shop','Shop'],['country','Country'],['usageType','Usage Type'],['assetType','Asset Type'],['salesPeriod','Sales Period'],['royaltyRate','Royalty Rate']];return <details className="filters"><summary>Global filters · {Object.values(filters).filter(Boolean).length} active</summary><div>{fields.map(([k,l])=><label key={k}>{l}<input value={filters[k]??''} onChange={e=>setFilters({...filters,[k]:e.target.value})}/></label>)}<button onClick={()=>setFilters({})}>Clear filters</button></div></details>}
-function Quick({setQuick}:{setQuick:(q:any)=>void}){const qs=[['artist','Search artist'],['albumTitle','Search release'],['catalogNumber','Search catalogue number'],['barcode','Search barcode'],['isrc','Search ISRC'],['trackTitle','Search track'],['shop','Search shop'],['country','Search country'],['salesPeriod','Search sales period']];return <section className="quick">{qs.map(([f,l])=><label key={f}>{l}<input onKeyDown={e=>{if(e.key==='Enter')setQuick({field:f,q:(e.target as HTMLInputElement).value,exact:['catalogNumber','barcode','isrc'].includes(f)})}} placeholder="Press Enter"/></label>)}</section>}
+const defaultStatementHealth = {
+  fileStatus: 'Original statement appears intact',
+  dataQuality: 'Excellent',
+  barcodeWarnings: 0,
+  rowsRequiringReview: 0,
+};
+function StatementHealth({
+  diagnostics,
+  openChecks,
+}: {
+  diagnostics: any;
+  openChecks: () => void;
+}) {
+  const h = { ...defaultStatementHealth, ...(diagnostics?.statementHealth ?? {}) };
+  return (
+    <section className="statement-health card">
+      <h2>Statement Health</h2>
+      <p>{h.fileStatus}</p>
+      <p>
+        Data Quality: <b>{h.dataQuality}</b>
+      </p>
+      <p>Barcode warnings: {h.barcodeWarnings}</p>
+      <p>Rows requiring review: {h.rowsRequiringReview}</p>
+      <button onClick={openChecks}>View data quality checks</button>
+    </section>
+  );
+}
+function Card(p: { title: string; value: string }) {
+  return (
+    <div className="card">
+      <span>{p.title}</span>
+      <b>{p.value}</b>
+    </div>
+  );
+}
+function Filters({
+  filters,
+  setFilters,
+  rows,
+}: {
+  filters: Record<string, string>;
+  setFilters: (f: Record<string, string>) => void;
+  rows: Transaction[];
+}) {
+  const fields = [
+    ['artist', 'Artist'],
+    ['albumTitle', 'Release'],
+    ['trackTitle', 'Track'],
+    ['catalogNumber', 'Catalogue number'],
+    ['barcode', 'Barcode'],
+    ['isrc', 'ISRC'],
+    ['shop', 'Shop'],
+    ['country', 'Country'],
+    ['usageType', 'Usage Type'],
+    ['assetType', 'Asset Type'],
+    ['salesPeriod', 'Sales Period'],
+    ['royaltyRate', 'Royalty Rate'],
+  ];
+  return (
+    <details className="filters">
+      <summary>Global filters · {Object.values(filters).filter(Boolean).length} active</summary>
+      <div>
+        {fields.map(([k, l]) => (
+          <label key={k}>
+            {l}
+            <input
+              value={filters[k] ?? ''}
+              onChange={(e) => setFilters({ ...filters, [k]: e.target.value })}
+            />
+          </label>
+        ))}
+        <button onClick={() => setFilters({})}>Clear filters</button>
+      </div>
+    </details>
+  );
+}
+function Quick({ setQuick }: { setQuick: (q: any) => void }) {
+  const qs = [
+    ['artist', 'Search artist'],
+    ['albumTitle', 'Search release'],
+    ['catalogNumber', 'Search catalogue number'],
+    ['barcode', 'Search barcode'],
+    ['isrc', 'Search ISRC'],
+    ['trackTitle', 'Search track'],
+    ['shop', 'Search shop'],
+    ['country', 'Search country'],
+    ['salesPeriod', 'Search sales period'],
+  ];
+  return (
+    <section className="quick">
+      {qs.map(([f, l]) => (
+        <label key={f}>
+          {l}
+          <input
+            onKeyDown={(e) => {
+              if (e.key === 'Enter')
+                setQuick({
+                  field: f,
+                  q: (e.target as HTMLInputElement).value,
+                  exact: ['catalogNumber', 'barcode', 'isrc'].includes(f),
+                });
+            }}
+            placeholder="Press Enter"
+          />
+        </label>
+      ))}
+    </section>
+  );
+}
 
 const EMPTY_ROWS:Transaction[]=[];
 export function useProgressiveSearchIndexes(rows:Transaction[]=EMPTY_ROWS,diagnostics:any,enabled=true){const[indexes,setIndexes]=useState<Record<string,Map<string,number[]>>>({});const wasEnabled=useRef(false);useEffect(()=>{let cancelled=false;let timer:number|undefined;const clearTimer=()=>{if(timer!==undefined){clearTimeout(timer);timer=undefined}};if(!enabled||!rows.length){if(wasEnabled.current){wasEnabled.current=false;setIndexes(prev=>Object.keys(prev).length?{}:prev)}return()=>{cancelled=true;clearTimer()}}wasEnabled.current=true;setIndexes(prev=>Object.keys(prev).length?{}:prev);const fields:(keyof Transaction)[]=['artist','albumTitle','catalogNumber','barcode','isrc','trackTitle','shop','country','salesPeriod'];let i=0;function buildNext(){timer=undefined;if(cancelled||i>=fields.length)return;const field=fields[i++];const st=safeNow();const m=new Map<string,number[]>();rows.forEach((r,idx)=>{const v=String(r[field]??'').toLowerCase();if(!v)return;if(!m.has(v))m.set(v,[]);m.get(v)!.push(idx)});recordTiming(diagnostics,'searchIndexMs',String(field),safeNow()-st);setIndexes(prev=>({...prev,[String(field)]:m}));if(!cancelled&&i<fields.length)timer=window.setTimeout(buildNext,0)}timer=window.setTimeout(buildNext,0);return()=>{cancelled=true;clearTimer()}},[rows,diagnostics,enabled]);return indexes}

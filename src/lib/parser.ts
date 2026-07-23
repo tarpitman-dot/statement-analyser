@@ -1,6 +1,12 @@
 import Decimal from 'decimal.js';
 import * as XLSX from 'xlsx';
-import { columnAliases, fieldLabels, requiredFields, resolveHeader, type FieldKey } from './columnAliases';
+import {
+  columnAliases,
+  fieldLabels,
+  requiredFields,
+  resolveHeader,
+  type FieldKey,
+} from './columnAliases';
 import { D, text } from './format';
 import { recordTimingValue, safeNow } from './timing';
 import { clampProgress, isLargeFile, type ImportProgress } from './importProgress';
