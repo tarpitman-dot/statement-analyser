@@ -54,7 +54,6 @@ const tabs = [
   'Sales Periods',
   'Deductions',
   'Full Detail',
-  'Import Checks',
 ];
 function App() {
   const [data, setData] = useState<StatementData>();
@@ -1131,7 +1130,6 @@ function Dashboard({ data, remove }: { data: StatementData; remove: () => void }
         </div>
         <button onClick={remove}>Remove statement</button>
       </header>
-      <StatementHealth diagnostics={data.diagnostics} openChecks={() => setTab('Import Checks')} />
       <section className="zip-export">
         <button className="primary" onClick={zipExport} disabled={!!exportProgress}>
           Download all breakdowns as ZIP
@@ -1336,33 +1334,6 @@ function Dashboard({ data, remove }: { data: StatementData; remove: () => void }
   );
 }
 
-const defaultStatementHealth = {
-  fileStatus: 'Original statement appears intact',
-  dataQuality: 'Excellent',
-  barcodeWarnings: 0,
-  rowsRequiringReview: 0,
-};
-function StatementHealth({
-  diagnostics,
-  openChecks,
-}: {
-  diagnostics: any;
-  openChecks: () => void;
-}) {
-  const h = { ...defaultStatementHealth, ...(diagnostics?.statementHealth ?? {}) };
-  return (
-    <section className="statement-health card">
-      <h2>Statement Health</h2>
-      <p>{h.fileStatus}</p>
-      <p>
-        Data Quality: <b>{h.dataQuality}</b>
-      </p>
-      <p>Barcode warnings: {h.barcodeWarnings}</p>
-      <p>Rows requiring review: {h.rowsRequiringReview}</p>
-      <button onClick={openChecks}>View data quality checks</button>
-    </section>
-  );
-}
 function Card(p: { title: string; value: string }) {
   return (
     <div className="card">
@@ -1507,17 +1478,17 @@ function Focused({ rows, clear }: { rows: Transaction[]; clear: () => void }) {
     </section>
   );
 }
-function Overview({ rows, diagnostics }: { rows: Transaction[]; diagnostics?: any }) {
+export function Overview({ rows, diagnostics }: { rows: Transaction[]; diagnostics?: any }) {
   const [prepare, setPrepare] = useState(!diagnostics?.largeFileMode);
-  const [chartData, setChartData] = useState<any | null>(null);
-  const [chartError, setChartError] = useState<string | null>(null);
+  const [overviewData, setOverviewData] = useState<any | null>(null);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
   const cache = useRef<Record<string, any>>({});
   const [key, setKey] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     setKey(null);
     if (!prepare) {
-      setChartData(null);
+      setOverviewData(null);
       return () => {
         cancelled = true;
       };
@@ -1527,23 +1498,23 @@ function Overview({ rows, diagnostics }: { rows: Transaction[]; diagnostics?: an
         if (!cancelled) setKey(k);
       })
       .catch((e) => {
-        if (!cancelled) setChartError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setOverviewError(e instanceof Error ? e.message : String(e));
       });
     return () => {
       cancelled = true;
     };
   }, [rows, prepare]);
   useEffect(() => {
-    setChartError(null);
+    setOverviewError(null);
     if (!key) {
-      setChartData(null);
+      setOverviewData(null);
       return;
     }
     if (cache.current[key]) {
-      setChartData(cache.current[key]);
+      setOverviewData(cache.current[key]);
       return;
     }
-    setChartData(null);
+    setOverviewData(null);
     let cancelled = false;
     const schedule = (cb: () => void) => {
       const ric = (window as any).requestIdleCallback as
@@ -1560,13 +1531,13 @@ function Overview({ rows, diagnostics }: { rows: Transaction[]; diagnostics?: an
         const st = safeNow();
         const data = prepareOverviewChartDataFromRows(rows);
         cache.current[key] = data;
-        if (!cancelled) setChartData(data);
+        if (!cancelled) setOverviewData(data);
         recordTimingValue(diagnostics, 'chartsMs', safeNow() - st);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         if (diagnostics?.invalidNumericValues)
-          diagnostics.invalidNumericValues.push(`Chart aggregation failed: ${msg}`);
-        if (!cancelled) setChartError(msg);
+          diagnostics.invalidNumericValues.push(`Overview aggregation failed: ${msg}`);
+        if (!cancelled) setOverviewError(msg);
       }
     });
     return () => {
@@ -1575,164 +1546,91 @@ function Overview({ rows, diagnostics }: { rows: Transaction[]; diagnostics?: an
     };
   }, [key, rows, diagnostics]);
   return (
-    <section className="overview" aria-label="Overview charts">
+    <section className="overview compact-overview" aria-label="Compact overview tables">
       {!prepare && (
-        <div className="chart-card">
+        <div className="overview-table-card">
           <p className="note">Large File Mode is active to reduce browser memory use.</p>
           <button onClick={() => setPrepare(true)}>Prepare detailed analysis</button>
         </div>
       )}
-      {prepare && chartError && <p className="error">Charts could not be prepared: {chartError}</p>}
+      {prepare && overviewError && <p className="error">Overview could not be prepared: {overviewError}</p>}
       {prepare &&
-        (!chartData ? (
-          <div className="chart-card">
-            <p className="note">Preparing chart…</p>
+        (!overviewData ? (
+          <div className="overview-table-card">
+            <p className="note">Preparing overview…</p>
           </div>
         ) : (
           <>
-            <BarChart
-              title="Top releases by earnings"
-              items={chartData.topReleases}
-              label={(x) => x.albumTitle || 'Unspecified release'}
-              tooltip={(x) =>
-                [
-                  `Full Album Title: ${x.albumTitle || 'Unspecified release'}`,
-                  `Artist: ${x.artist || 'Unspecified artist'}`,
-                  `Barcode: ${x.barcode || ''}`,
-                  `Catalog Number: ${x.catalogNumber || ''}`,
-                  `Release Code: ${x.releaseCode || ''}`,
-                  `Your earnings: ${fmtMoney(x.royaltyAmount)}`,
-                  `Revenue before your royalty rate: ${fmtMoney(x.amount)}`,
-                  `Sales / usages: ${fmtInt(x.sales)}`,
-                ].join('\n')
-              }
+            <RankedTable
+              title="Top releases"
+              items={overviewData.topReleases}
+              columns={[
+                { header: 'Artist', value: (x) => x.artist || 'Unspecified artist' },
+                { header: 'Release Title', value: (x) => x.albumTitle || 'Unspecified release' },
+              ]}
             />
-            <BarChart
-              title="Top artists by earnings"
-              items={chartData.topArtists}
-              label={(x) => x.artist || 'Unspecified artist'}
-              tooltip={(x) =>
-                [
-                  `Artist: ${x.artist || 'Unspecified artist'}`,
-                  `Your earnings: ${fmtMoney(x.royaltyAmount)}`,
-                  `Revenue before your royalty rate: ${fmtMoney(x.amount)}`,
-                  `Sales / usages: ${fmtInt(x.sales)}`,
-                  `Release count: ${fmtInt(x.releaseCount)}`,
-                ].join('\n')
-              }
+            <RankedTable
+              title="Top artists"
+              items={overviewData.topArtists}
+              columns={[{ header: 'Artist', value: (x) => x.artist || 'Unspecified artist' }]}
             />
-            <LineChart title="Earnings by sales period" items={chartData.salesPeriods} />
-            <BarChart
-              title="Top shops by earnings"
-              items={chartData.topShops}
-              label={(x) => x.shop || 'Unspecified shop'}
-              tooltip={(x) => {
-                const total = D(chartData.filteredRoyaltyTotal);
-                const pct = total.isZero()
-                  ? '0.0'
-                  : D(x.royaltyAmount).div(total).mul(100).toFixed(1);
-                return [
-                  `Shop: ${x.shop || 'Unspecified shop'}`,
-                  `Your earnings: ${fmtMoney(x.royaltyAmount)}`,
-                  `Revenue before your royalty rate: ${fmtMoney(x.amount)}`,
-                  `Sales / usages: ${fmtInt(x.sales)}`,
-                  `Percentage of total filtered earnings: ${pct}%`,
-                ].join('\n');
-              }}
+            <RankedTable
+              title="Top shops"
+              items={overviewData.topShops}
+              columns={[{ header: 'Shop', value: (x) => x.shop || 'Unspecified shop' }]}
             />
-            <BarChart
-              title="Earnings by usage type"
-              items={chartData.usageTypes}
-              label={(x) => x.usageType || 'Unspecified usage type'}
-              tooltip={(x) =>
-                [
-                  `Usage Type: ${x.usageType || 'Unspecified usage type'}`,
-                  `Your earnings: ${fmtMoney(x.royaltyAmount)}`,
-                  `Revenue before your royalty rate: ${fmtMoney(x.amount)}`,
-                  `Sales / usages: ${fmtInt(x.sales)}`,
-                ].join('\n')
-              }
+            <RankedTable
+              title="Usage types"
+              items={overviewData.usageTypes}
+              columns={[{ header: 'Usage type', value: (x) => x.usageType || 'Unspecified usage type' }]}
+            />
+            <RankedTable
+              title="Countries"
+              items={overviewData.topCountries}
+              columns={[{ header: 'Country', value: (x) => x.country || 'Unspecified country' }]}
             />
           </>
         ))}
     </section>
   );
 }
-function BarChart({
+function RankedTable({
   title,
   items,
-  label,
-  tooltip,
+  columns,
 }: {
   title: string;
   items: any[];
-  label: (x: any) => string;
-  tooltip: (x: any) => string;
+  columns: { header: string; value: (x: any) => string }[];
 }) {
-  const max = items.reduce((m, x) => Decimal.max(m, D(x.royaltyAmount).abs()), D(0));
   return (
-    <section className="chart-card" aria-label={title}>
+    <section className="overview-table-card" aria-label={title}>
       <h2>{title}</h2>
-      {items.map((x, i) => {
-        const width = max.isZero() ? 0 : D(x.royaltyAmount).abs().div(max).mul(100).toNumber();
-        return (
-          <div className="bar-row" key={i} title={tooltip(x)}>
-            <span>{label(x)}</span>
-            <div>
-              <i style={{ width: `${width}%` }} />
-              <b>{fmtMoney(x.royaltyAmount)}</b>
-            </div>
-          </div>
-        );
-      })}
-      {!items.length && <p className="empty">No earnings to chart.</p>}
-    </section>
-  );
-}
-function LineChart({ title, items }: { title: string; items: any[] }) {
-  const max = items.reduce((m, x) => Decimal.max(m, D(x.royaltyAmount).abs()), D(0));
-  const points = items
-    .map((x, i) => {
-      const xp = items.length <= 1 ? 50 : (i / (items.length - 1)) * 100,
-        yp = max.isZero() ? 90 : 100 - D(x.royaltyAmount).abs().div(max).mul(90).toNumber();
-      return `${xp},${yp}`;
-    })
-    .join(' ');
-  return (
-    <section className="chart-card" aria-label={title}>
-      <h2>{title}</h2>
-      <p className="note">
-        Sales Period is when the underlying usage or sale occurred. It may be earlier than the
-        statement reporting month.
-      </p>
-      <svg viewBox="0 0 100 100" role="img" aria-label="Earnings by sales period line chart">
-        <polyline fill="none" stroke="#1f4b99" strokeWidth="3" points={points} />
-        {items.map((x, i) => {
-          const [cx, cy] = (points.split(' ')[i] || '0,0').split(',');
-          return (
-            <circle key={i} cx={cx} cy={cy} r="2.5">
-              <title>
-                {[
-                  `Sales Period: ${x.salesPeriod}`,
-                  `Your earnings: ${fmtMoney(x.royaltyAmount)}`,
-                  `Revenue before your royalty rate: ${fmtMoney(x.amount)}`,
-                  `Sales / usages: ${fmtInt(x.sales)}`,
-                ].join('\n')}
-              </title>
-            </circle>
-          );
-        })}
-      </svg>
-      <div className="period-labels">
-        {items.map((x: any) => (
-          <span key={x.salesPeriod}>
-            {x.salesPeriod}
-            <br />
-            {fmtMoney(x.royaltyAmount)}
-          </span>
-        ))}
-      </div>
-      {!items.length && <p className="empty">No valid sales periods to chart.</p>}
+      <table className="compact-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            {columns.map((c) => (
+              <th key={c.header}>{c.header}</th>
+            ))}
+            <th className="num">Earnings</th>
+            <th className="num">Units / streams</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((x, i) => (
+            <tr key={i}>
+              <td className="rank">{i + 1}</td>
+              {columns.map((c) => (
+                <td className="wrap" key={c.header}>{c.value(x)}</td>
+              ))}
+              <td className="num">{fmtMoney(x.royaltyAmount)}</td>
+              <td className="num">{fmtInt(x.sales)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!items.length && <p className="empty">No earnings to show.</p>}
     </section>
   );
 }
@@ -1965,97 +1863,10 @@ function Checks({
     label: String(label),
     ...groupedReconciliation((source as Transaction[]) ?? filteredRows, g as any[]),
   }));
-  const barcodeRows = d.barcodeIntegrity.warnings.map((w) => ({
-    sourceSheet: w.sourceSheet,
-    sourceRow: String(w.sourceRow),
-    barcodeValue: w.barcodeValue,
-    warning: w.warning,
-    suggestedReason: w.suggestedReason,
-  }));
   return (
     <section className="panel">
       <button onClick={() => setDups(findDuplicates(data.rows))}>Run duplicate check</button>
       <p className="note">This check may take longer on large statements.</p>
-      {d.barcodeIntegrity.warnings.length > 0 && (
-        <aside className="error">
-          <p>⚠ Some barcode values may have been altered before upload.</p>
-          <p>Possible causes include:</p>
-          <ul>
-            <li>Spreadsheet software converting barcodes into numbers.</li>
-            <li>Leading zeroes removed.</li>
-            <li>Scientific notation.</li>
-            <li>Very long numeric identifiers.</li>
-          </ul>
-          <p>If possible, upload the original statement downloaded from Cargo.</p>
-          <p>
-            These warnings relate to the uploaded file itself; the analyser has not changed the
-            data.
-          </p>
-        </aside>
-      )}
-      <h2>Barcode Integrity</h2>
-      <button
-        onClick={() =>
-          downloadCsv(
-            'barcode-integrity-warnings.csv',
-            toCsv(barcodeRows, [
-              'sourceSheet',
-              'sourceRow',
-              'barcodeValue',
-              'warning',
-              'suggestedReason',
-            ]),
-          )
-        }
-      >
-        Export barcode warnings
-      </button>
-      <dl>
-        <dt>Populated barcode rows</dt>
-        <dd>{d.barcodeIntegrity.populatedBarcodeRows}</dd>
-        <dt>Blank barcode rows</dt>
-        <dd>{d.barcodeIntegrity.blankBarcodeRows}</dd>
-        <dt>Unique barcode count</dt>
-        <dd>{d.barcodeIntegrity.uniqueBarcodeCount}</dd>
-        <dt>Numeric barcode cells</dt>
-        <dd>{d.barcodeIntegrity.numericBarcodeCells}</dd>
-        <dt>Text barcode cells</dt>
-        <dd>{d.barcodeIntegrity.textBarcodeCells}</dd>
-        <dt>Scientific notation values converted</dt>
-        <dd>{d.barcodeIntegrity.scientificNotationValuesConverted}</dd>
-        <dt>Decimal suffixes removed</dt>
-        <dd>{d.barcodeIntegrity.decimalSuffixesRemoved}</dd>
-        <dt>Possible lost-leading-zero warnings</dt>
-        <dd>{d.barcodeIntegrity.possibleLostLeadingZeroWarnings}</dd>
-        <dt>Unsafe precision warnings</dt>
-        <dd>{d.barcodeIntegrity.unsafePrecisionWarnings}</dd>
-        <dt>Duplicate barcode conflicts</dt>
-        <dd>{d.barcodeIntegrity.duplicateBarcodeConflicts}</dd>
-        <dt>Rows requiring review</dt>
-        <dd>{d.barcodeIntegrity.rowsRequiringReview}</dd>
-      </dl>
-      <table>
-        <thead>
-          <tr>
-            <th>Source sheet</th>
-            <th>Source row</th>
-            <th>Barcode value</th>
-            <th>Warning</th>
-            <th>Suggested reason</th>
-          </tr>
-        </thead>
-        <tbody>
-          {d.barcodeIntegrity.warnings.map((w: any, i: number) => (
-            <tr key={i}>
-              <td>{w.sourceSheet}</td>
-              <td>{w.sourceRow}</td>
-              <td>{w.barcodeValue}</td>
-              <td>{w.warning}</td>
-              <td>{w.suggestedReason}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
       <h2>Grouped total reconciliation</h2>
       <table>
         <thead>
@@ -2146,4 +1957,5 @@ function findDuplicates(rows: Transaction[]) {
   }
   return [...seen.values()].filter((v) => v > 1).reduce((a, v) => a + v, 0);
 }
-createRoot(document.getElementById('root')!).render(<App />);
+const root = document.getElementById('root');
+if (root) createRoot(root).render(<App />);

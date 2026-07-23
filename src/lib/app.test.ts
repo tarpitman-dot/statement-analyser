@@ -1099,11 +1099,10 @@ describe('overview chart data regressions', () => {
       usageTypes = groupBy(rows, 'usageType');
     const charts = prepareOverviewChartData({ releases, artists, shops, salesPeriods, usageTypes });
     expect(releases.length).toBe(14);
-    expect(charts.topReleases.length).toBe(10);
-    expect(charts.topArtists.length).toBe(10);
-    expect(charts.topShops.length).toBe(10);
-    expect(charts.usageTypes.length).toBe(11);
-    expect(charts.usageTypes.at(-1).usageType).toBe('Other');
+    expect(charts.topReleases.length).toBe(14);
+    expect(charts.topArtists.length).toBe(14);
+    expect(charts.topShops.length).toBe(15);
+    expect(charts.usageTypes.length).toBe(15);
     expect(charts.topReleases[0]).not.toHaveProperty('returns');
     expect(charts.topShops[0]).not.toHaveProperty('returns');
     expect(JSON.stringify(charts)).not.toContain('Returns');
@@ -1157,6 +1156,26 @@ describe('barcode integrity and statement health', () => {
     expect(s.diagnostics.statementHealth.rowsRequiringReview).toBe(0);
     expect(s.diagnostics.barcodeIntegrity.populatedBarcodeRows).toBe(1);
   });
+
+  it('numeric barcode cells alone do not create actionable warnings or review rows', () => {
+    const numeric: any[] = [...row];
+    numeric[7] = 1234567890123;
+    const s = parseWorkbook(wb([headers, numeric]));
+    expect(s.diagnostics.barcodeIntegrity.numericBarcodeCells).toBe(1);
+    expect(s.diagnostics.barcodeIntegrity.warnings).toHaveLength(0);
+    expect(s.diagnostics.barcodeIntegrity.rowsRequiringReview).toBe(0);
+    expect(s.diagnostics.statementHealth.fileStatus).toBe('Original statement appears intact');
+    expect(s.diagnostics.statementHealth.dataQuality).toBe('Excellent');
+  });
+  it('real barcode corruption still produces an actionable warning', () => {
+    const malformed = [...row];
+    malformed[7] = '12345ABC';
+    const s = parseWorkbook(wb([headers, malformed]));
+    expect(s.diagnostics.barcodeIntegrity.warnings.some((w) => w.warning === 'Malformed barcode')).toBe(true);
+    expect(s.diagnostics.statementHealth.dataQuality).toBe('Review recommended');
+    expect(s.diagnostics.statementHealth.rowsRequiringReview).toBe(1);
+  });
+
   it('CSV and Excel produce identical totals while preserving CSV leading zeroes', () => {
     const csvWb = XLSX.read(
       [headers.join(','), [...row.slice(0, 7), '0123456789012', ...row.slice(8)].join(',')].join(
@@ -1191,7 +1210,7 @@ describe('barcode integrity and statement health', () => {
     expect(s.diagnostics.barcodeIntegrity.decimalSuffixesRemoved).toBe(1);
     expect(s.diagnostics.statementHealth.dataQuality).toBe('Good');
   });
-  it('numeric, unsafe precision, short values, blanks, and duplicate conflicts are reported without guessing digits', () => {
+  it('unsafe precision, short values, blanks, and duplicate conflicts are reported without guessing digits', () => {
     const numeric: any[] = [...row];
     numeric[7] = 1234567890123;
     const unsafe = [...row];

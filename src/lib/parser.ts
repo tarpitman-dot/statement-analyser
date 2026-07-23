@@ -167,16 +167,6 @@ function barcodeCellText(
     );
     value = value.replace(/\.0+$/, '');
   }
-  if (cell?.t === 'n')
-    addBarcodeWarning(
-      d,
-      sheet,
-      sourceRow,
-      value,
-      'Stored as numeric value',
-      'Numeric barcode cells can lose leading zeroes or precision in spreadsheet software.',
-      'review',
-    );
   if (/^\d+$/.test(value) && value.length < 12) {
     d.barcodeIntegrity.possibleLostLeadingZeroWarnings++;
     addBarcodeWarning(
@@ -197,6 +187,17 @@ function barcodeCellText(
       value,
       'Unusually long barcode',
       'This identifier is longer than common barcode formats and should be reviewed.',
+      'review',
+    );
+  }
+  if (value && !/^\d+$/.test(value)) {
+    addBarcodeWarning(
+      d,
+      sheet,
+      sourceRow,
+      value,
+      'Malformed barcode',
+      'Barcode contains characters outside the expected numeric format.',
       'review',
     );
   }
@@ -296,7 +297,6 @@ function finaliseBarcodeDiagnostics(
   ).size;
   const hasReview = b.rowsRequiringReview > 0;
   const hasEvidence =
-    b.numericBarcodeCells > 0 ||
     b.scientificNotationValuesConverted > 0 ||
     b.decimalSuffixesRemoved > 0 ||
     b.unsafePrecisionWarnings > 0 ||
