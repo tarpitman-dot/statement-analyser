@@ -1,6 +1,8 @@
 export type WorkerEventName =
   | 'file-read'
   | 'worker-created'
+  | 'worker-ready'
+  | 'worker-startup-timeout'
   | 'worker-message'
   | 'worker-error'
   | 'worker-messageerror'
@@ -14,7 +16,12 @@ export interface ImportDebugContext {
   errorName?: string;
   errorMessage?: string;
   stack?: string;
+  filename?: string;
   lineNumber?: number;
+  columnNumber?: number;
+  workerUrl?: string;
+  workerStartupCompleted?: 'Yes' | 'No' | 'Unknown';
+  firstWorkerMessageReceived?: 'Yes' | 'No' | 'Unknown';
   processingStage: string;
   workerEvent: WorkerEventName | string;
   workbookFilename: string;
@@ -55,7 +62,12 @@ export function technicalDetails(ctx: ImportDebugContext, thrown?: unknown) {
     `error name: ${ctx.errorName ?? s.name ?? 'UnknownError'}`,
     `error message: ${ctx.errorMessage ?? s.message ?? 'No error message supplied.'}`,
     `stack trace: ${ctx.stack ?? s.stack ?? 'Not available'}`,
+    `filename: ${ctx.filename ?? 'Not available'}`,
     `line number: ${ctx.lineNumber ?? 'Not available'}`,
+    `column number: ${ctx.columnNumber ?? 'Not available'}`,
+    `worker URL: ${ctx.workerUrl ?? 'Unknown'}`,
+    `worker startup completed: ${ctx.workerStartupCompleted ?? 'Unknown'}`,
+    `first worker message received: ${ctx.firstWorkerMessageReceived ?? 'Unknown'}`,
     `processing stage: ${ctx.processingStage}`,
     `worker started: ${ctx.workerStarted ?? 'Unknown'}`,
     `ArrayBuffer transfer succeeded: ${ctx.arrayBufferTransferSucceeded ?? 'Unknown'}`,

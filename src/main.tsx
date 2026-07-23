@@ -135,7 +135,8 @@ function App() {
             setProgress(null);
             return;
           }
-          w = new Worker(new URL('./importWorker.ts', import.meta.url), {
+          const workerUrl = 'Vite-built worker asset';
+          w = new Worker(new URL('./workers/importWorker.ts', import.meta.url), {
             type: 'module',
             name: 'statement-import-worker',
           });
@@ -149,18 +150,66 @@ function App() {
             undefined,
             'not started',
             0,
+            workerUrl,
           );
+          let workerReady = false;
+          let firstWorkerMessageReceived = false;
+          const startupTimeout = window.setTimeout(() => {
+            if (workerReady) return;
+            const ctx = {
+              ...latest,
+              processingStage: 'Opening workbook',
+              workerEvent: 'worker-startup-timeout',
+              workerStarted: 'No' as const,
+              workerStartupCompleted: 'No' as const,
+              firstWorkerMessageReceived: firstWorkerMessageReceived
+                ? ('Yes' as const)
+                : ('No' as const),
+              sheetJsReadAttempt: 'not started',
+            };
+            setErr({
+              stage: ctx.processingStage,
+              message: 'The import worker did not start, so the workbook was not transferred.',
+              details: technicalDetails(ctx, new Error('Timed out waiting for worker-ready.')),
+              rowsProcessed: 0,
+              canCompatibility: true,
+              file: f,
+            });
+            setProgress(null);
+            activeWorker.terminate();
+            worker.current = null;
+          }, 5000);
           w.onmessage = (e) => {
+            firstWorkerMessageReceived = true;
             latest = {
               ...latest,
               ...e.data.context,
               workerEvent: e.data.context?.workerEvent ?? 'worker-message',
+              workerStartupCompleted:
+                e.data.type === 'worker-ready' ? 'Yes' : latest.workerStartupCompleted,
+              firstWorkerMessageReceived: 'Yes',
             };
-            if (
-              e.data.type === 'worker-ready' ||
-              e.data.type === 'worker-received' ||
-              e.data.type === 'sheetjs-read-start'
-            ) {
+            if (e.data.type === 'worker-ready') {
+              workerReady = true;
+              window.clearTimeout(startupTimeout);
+              activeWorker.postMessage(
+                {
+                  buffer,
+                  filename: f.name,
+                  fileSize: f.size,
+                  fileReadMs: safeNow() - t,
+                  arrayBufferSizeBeforeTransfer: before,
+                },
+                [buffer],
+              );
+              latest = {
+                ...latest,
+                workerEvent: 'post-message',
+                arrayBufferTransferSucceeded: buffer.byteLength === 0 ? 'Yes' : 'No',
+              };
+              return;
+            }
+            if (e.data.type === 'worker-received' || e.data.type === 'sheetjs-read-start') {
               return;
             }
             if (e.data.type === 'progress') {
@@ -173,6 +222,7 @@ function App() {
                 }),
               );
             } else if (e.data.type === 'complete') {
+              window.clearTimeout(startupTimeout);
               lastProgress.current = Date.now();
               setProgress((p) =>
                 monotonic(p, {
@@ -198,6 +248,7 @@ function App() {
                 setFileMeta(null);
               }, 500);
             } else if (e.data.type === 'error') {
+              window.clearTimeout(startupTimeout);
               const details =
                 e.data.error?.details ||
                 technicalDetails(
@@ -222,6 +273,7 @@ function App() {
             }
           };
           w.onerror = (e) => {
+            window.clearTimeout(startupTimeout);
             const err = new Error(e.message);
             err.name = e.type || 'ErrorEvent';
             err.stack = [e.message, e.filename ? `at ${e.filename}:${e.lineno}:${e.colno}` : '']
@@ -234,7 +286,14 @@ function App() {
               errorName: err.name,
               errorMessage: err.message,
               stack: err.stack,
+              filename: e.filename,
               lineNumber: e.lineno,
+              columnNumber: e.colno,
+              workerUrl: e.filename || workerUrl,
+              workerStartupCompleted: workerReady ? ('Yes' as const) : ('No' as const),
+              firstWorkerMessageReceived: firstWorkerMessageReceived
+                ? ('Yes' as const)
+                : ('No' as const),
             };
             setErr({
               stage: ctx.processingStage,
@@ -249,10 +308,15 @@ function App() {
             worker.current = null;
           };
           w.onmessageerror = () => {
+            window.clearTimeout(startupTimeout);
             const ctx = {
               ...latest,
               processingStage: progress?.stage ?? 'Opening workbook',
               workerEvent: 'worker-messageerror',
+              workerStartupCompleted: workerReady ? ('Yes' as const) : ('No' as const),
+              firstWorkerMessageReceived: firstWorkerMessageReceived
+                ? ('Yes' as const)
+                : ('No' as const),
             };
             setErr({
               stage: ctx.processingStage,
@@ -268,21 +332,6 @@ function App() {
             setProgress(null);
             activeWorker.terminate();
             worker.current = null;
-          };
-          activeWorker.postMessage(
-            {
-              buffer,
-              filename: f.name,
-              fileSize: f.size,
-              fileReadMs: safeNow() - t,
-              arrayBufferSizeBeforeTransfer: before,
-            },
-            [buffer],
-          );
-          latest = {
-            ...latest,
-            workerEvent: 'post-message',
-            arrayBufferTransferSucceeded: buffer.byteLength === 0 ? 'Yes' : 'No',
           };
         } catch (e) {
           const ctx = debugContext(
@@ -415,6 +464,7 @@ function debugContext(
   arrayBufferSizeInsideWorker?: number,
   sheetJsReadAttempt?: string,
   retryAttemptNumber?: number,
+  workerUrl?: string,
 ): ImportDebugContext {
   return {
     processingStage,
@@ -425,6 +475,9 @@ function debugContext(
     arrayBufferSizeInsideWorker,
     sheetJsReadAttempt,
     retryAttemptNumber,
+    workerUrl,
+    workerStartupCompleted: 'Unknown',
+    firstWorkerMessageReceived: 'Unknown',
     workerStarted: 'Unknown',
     arrayBufferTransferSucceeded: 'Unknown',
     workerPayloadReceived: 'Unknown',
