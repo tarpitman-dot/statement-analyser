@@ -35,7 +35,12 @@ import type { StatementData, Transaction } from './lib/types';
 import type { ImportProgress } from './lib/importProgress';
 import { clampProgress, isLargeFile, type ImportStage } from './lib/importProgress';
 import { parseFile } from './lib/parser';
-import { LARGE_XLSX_CONVERTER_URL, shouldOfferLargeXlsxConversion } from './lib/largeExcel';
+import {
+  LARGE_XLSX_CONVERTER_URL,
+  checkConverterHealth,
+  shouldOfferLargeXlsxConversion,
+  type ConverterHealth,
+} from './lib/largeExcel';
 import { technicalDetails, type ImportDebugContext } from './lib/importDiagnostics';
 import './styles.css';
 const tabs = [
@@ -61,6 +66,12 @@ function App() {
     estimatedRows?: number;
   } | null>(null);
   const [stalled, setStalled] = useState(false);
+  const [converterHealth, setConverterHealth] = useState<{
+    loading: boolean;
+    available: boolean;
+    message: string;
+    details?: ConverterHealth;
+  }>({ loading: false, available: false, message: 'Converter not checked.' });
   const worker = useRef<Worker | null>(null);
   const activeConversion = useRef<{
     id: number;
@@ -68,6 +79,31 @@ function App() {
     reader: FileReader | null;
   }>({ id: 0, xhr: null, reader: null });
   const lastProgress = useRef(0);
+  useEffect(() => {
+    if (!conversionPrompt) return;
+    const controller = new AbortController();
+    setConverterHealth({ loading: true, available: false, message: 'Checking converter availability…' });
+    checkConverterHealth(controller.signal)
+      .then((details) =>
+        setConverterHealth({
+          loading: false,
+          available: true,
+          message: `Converter ready for ${formatBytes(details.maxUploadBytes)} uploads.`,
+          details,
+        }),
+      )
+      .catch((error) =>
+        setConverterHealth({
+          loading: false,
+          available: false,
+          message:
+            error instanceof Error
+              ? error.message
+              : 'The converter is unavailable. Use manual Save as CSV instructions.',
+        }),
+      );
+    return () => controller.abort();
+  }, [conversionPrompt]);
   useEffect(() => {
     if (!progress) return;
     const id = setInterval(() => {
@@ -705,13 +741,29 @@ function App() {
         diagnostics.httpStatus = xhr.status;
         diagnostics.responseSize = xhr.response?.size ?? 0;
         if (xhr.status < 200 || xhr.status >= 300) {
-          reject(
-            new Error(
-              xhr.response?.size
-                ? 'The converter rejected the workbook.'
-                : `Converter HTTP ${xhr.status}`,
-            ),
-          );
+          if (xhr.response?.size) {
+            xhr.response
+              .text()
+              .then((text: string) => {
+                try {
+                  const payload = JSON.parse(text) as {
+                    error?: string;
+                    stage?: string;
+                    details?: string;
+                  };
+                  reject(
+                    new Error(
+                      `${payload.error || `Converter HTTP ${xhr.status}`} (stage: ${
+                        payload.stage || 'unknown'
+                      })${payload.details ? ` Details: ${payload.details}` : ''}`,
+                    ),
+                  );
+                } catch {
+                  reject(new Error(`Converter HTTP ${xhr.status}: ${text.slice(0, 500)}`));
+                }
+              })
+              .catch(() => reject(new Error(`Converter HTTP ${xhr.status}`)));
+          } else reject(new Error(`Converter HTTP ${xhr.status}`));
           return;
         }
         diagnostics.csvBlob = xhr.response;
@@ -723,8 +775,15 @@ function App() {
         );
         resolve();
       };
-      xhr.onerror = () =>
-        reject(new Error('The workbook upload failed before the converter returned a response.'));
+      xhr.onerror = () => {
+        diagnostics.httpStatus = xhr.status || 0;
+        diagnostics.abortReason = 'network-failure';
+        reject(
+          new Error(
+            'Network failure: the browser could not reach the converter. Check the API route, proxy, CORS and converter health endpoint.',
+          ),
+        );
+      };
       xhr.ontimeout = () => {
         diagnostics.abortReason = 'converter-response-timeout';
         reject(new Error('The converter response timed out.'));
@@ -773,6 +832,7 @@ function App() {
           cancel={() => cancel(true)}
           conversionPrompt={conversionPrompt}
           onConvert={convertLargeWorkbook}
+          converterHealth={converterHealth}
         />
       ) : (
         <Dashboard data={data} remove={() => setData(undefined)} />
@@ -834,6 +894,8 @@ function friendlyConversionError(error: unknown, reason: unknown) {
     return 'No upload progress was reported for 30 seconds, so the upload was aborted. Please check your connection and retry.';
   if (/timeout/i.test(message))
     return `${message} Please retry or use a dedicated conversion service/object-storage upload endpoint.`;
+  if (/health check|unavailable|Network failure/i.test(message))
+    return `${message} The upload was not started unless the health endpoint reported availability; use the manual CSV fallback until production converter infrastructure is configured.`;
   if (/413|larger|too large/i.test(message))
     return 'The converter endpoint cannot accept this workbook size. Use a conversion service or direct object-storage upload configured for at least 50 MB XLSX files.';
   return friendly(message);
@@ -857,6 +919,7 @@ function Upload(p: {
   cancel: () => void;
   conversionPrompt: { file: File; estimatedRows?: number } | null;
   onConvert: (f: File) => void;
+  converterHealth: { loading: boolean; available: boolean; message: string; details?: ConverterHealth };
 }) {
   if (p.conversionPrompt && p.file)
     return (
@@ -881,9 +944,27 @@ function Upload(p: {
             <p>No statement analysis is performed on the server.</p>
             <p>All summaries and calculations continue to happen locally in your browser.</p>
           </aside>
-          <button onClick={() => p.onConvert(p.conversionPrompt!.file)}>
+          <p className={p.converterHealth.available ? 'note' : 'error'}>{p.converterHealth.message}</p>
+          {p.converterHealth.details && (
+            <dl>
+              <dt>Worksheet</dt>
+              <dd>{p.converterHealth.details.supportedWorksheet}</dd>
+              <dt>Converter version</dt>
+              <dd>{p.converterHealth.details.converterVersion}</dd>
+            </dl>
+          )}
+          <button
+            disabled={!p.converterHealth.available || p.converterHealth.loading}
+            onClick={() => p.onConvert(p.conversionPrompt!.file)}
+          >
             Convert and continue
           </button>
+          {!p.converterHealth.available && (
+            <p className="note">
+              Manual option: open the workbook in Excel, Numbers or LibreOffice, choose the Digital
+              Sales worksheet, then use Save As / Export to create a CSV and upload that CSV here.
+            </p>
+          )}
           <button onClick={p.cancel}>Cancel</button>
         </section>
       </main>
@@ -1028,7 +1109,7 @@ function Upload(p: {
         <aside className="privacy compact-privacy">
           <p>
             <strong>
-              Your statement is processed locally in your browser and is not uploaded.
+              Normal-sized statements are processed entirely in your browser and are not uploaded.
             </strong>
           </p>
           <details>
@@ -1038,8 +1119,10 @@ function Upload(p: {
               Microsoft Excel can.
             </p>
             <p>
-              This analyser runs entirely inside your browser, so your statement is never uploaded
-              to Cargo or stored online.
+              This analyser runs entirely inside your browser for normal-sized statements, so those
+              files are not uploaded to Cargo or stored online. Very large Excel statements can only
+              be processed after you choose optional secure conversion to CSV. When you use that
+              option, the workbook is temporarily uploaded for conversion and deleted afterwards.
             </p>
           </details>
           <details>
@@ -1055,11 +1138,11 @@ function Upload(p: {
                 The analyser reads the Excel workbook and creates the summaries you see on screen.
               </li>
               <li>Everything happens inside your browser.</li>
-              <li>Nothing is uploaded to Cargo or sent anywhere else.</li>
+              <li>Normal-sized statements are not uploaded to Cargo or sent anywhere else.</li>
               <li>When you close or refresh this page, the statement is removed from memory.</li>
             </ol>
             <p>
-              <strong>We never receive, store or keep a copy of your statement.</strong>
+              <strong>Temporary converter uploads are deleted after CSV conversion.</strong>
             </p>
           </details>
         </aside>
