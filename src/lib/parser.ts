@@ -722,6 +722,10 @@ export async function parseArrayBuffer(
   }
 }
 export async function parseFile(file: File, opts: ParseOptions = {}) {
+  if (/\.csv$/i.test(file.name)) {
+    const { parseCsvFileStreaming } = await import('./streamingCsvParser');
+    return parseCsvFileStreaming(file, opts);
+  }
   const t = safeNow();
   const buf = await file.arrayBuffer();
   opts.onProgress?.({
