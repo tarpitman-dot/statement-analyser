@@ -13,17 +13,11 @@ import type { StatementData, Transaction } from './types';
 
 export type ExportProgressStage =
   | 'Validating totals'
-  | 'Preparing reconciliation report'
-  | 'Preparing summary'
   | 'Preparing artists'
   | 'Preparing releases'
   | 'Preparing tracks'
   | 'Preparing shops'
   | 'Preparing countries'
-  | 'Preparing sales periods'
-  | 'Preparing usage types'
-  | 'Preparing full detail'
-  | 'Preparing import checks'
   | 'Creating ZIP'
   | 'Complete';
 export type ExportProgress = { stage: ExportProgressStage; index: number; total: number };
@@ -161,7 +155,7 @@ export function buildBreakdowns(data: StatementData) {
     'Percentage of total Sales': pct(g.sales, st.sales),
   });
   add(
-    '02-artists.csv',
+    '01-artists.csv',
     'Artists',
     [
       'Artist',
@@ -184,7 +178,7 @@ export function buildBreakdowns(data: StatementData) {
     })),
   );
   add(
-    '03-releases.csv',
+    '02-releases.csv',
     'Releases',
     [
       'Artist',
@@ -215,7 +209,7 @@ export function buildBreakdowns(data: StatementData) {
   const tr = groupTracks(rows);
   const trackSource = trackRows(rows);
   add(
-    '04-tracks.csv',
+    '03-tracks.csv',
     'Tracks',
     [
       'Artist',
@@ -255,7 +249,7 @@ export function buildBreakdowns(data: StatementData) {
   if (hasField(rows, 'shop')) {
     const g = groupBy(rows, 'shop');
     add(
-      '05-shops.csv',
+      '04-shops.csv',
       'Shops',
       [
         'Shop',
@@ -283,7 +277,7 @@ export function buildBreakdowns(data: StatementData) {
   if (hasField(rows, 'country')) {
     const g = groupBy(rows, 'country');
     add(
-      '06-countries.csv',
+      '05-countries.csv',
       'Countries',
       [
         'Country',
@@ -306,57 +300,6 @@ export function buildBreakdowns(data: StatementData) {
         'Release Count': x.releaseCount,
         'Track Count': x.trackCount,
         'Shop Count': x.shopCount,
-        'Transaction Count': x.transactionRows,
-      })),
-    );
-  }
-  if (hasField(rows, 'salesPeriod')) {
-    const g = groupBy(rows, 'salesPeriod').sort((a, b) =>
-      periodSortValue(a.salesPeriod).localeCompare(periodSortValue(b.salesPeriod)),
-    );
-    add(
-      '07-sales-periods.csv',
-      'Sales Periods',
-      ['Sales Period', 'Royalty Amount', 'Amount', 'Sales', 'Shop Count', 'Country Count', 'Transaction Count'],
-      g.map((x) => ({
-        'Sales Period': x.salesPeriod,
-        'Royalty Amount': ds(x.royaltyAmount),
-        Amount: ds(x.amount),
-        Sales: ds(x.sales),
-        'Shop Count': x.shopCount,
-        'Country Count': x.countryCount,
-        'Transaction Count': x.transactionRows,
-      })),
-    );
-  }
-  if (hasField(rows, 'usageType')) {
-    const g = groupBy(rows, 'usageType');
-    add(
-      '08-usage-types-or-formats.csv',
-      'Usage Types',
-      [
-        'Usage Type',
-        'Royalty Amount',
-        'Amount',
-        'Sales',
-        'Percentage of total Royalty Amount',
-        'Percentage of total Amount',
-        'Percentage of total Sales',
-        'Artist Count',
-        'Release Count',
-        'Track Count',
-        'Shop Count',
-        'Country Count',
-        'Transaction Count',
-      ],
-      g.map((x) => ({
-        'Usage Type': x.usageType,
-        ...common(x),
-        'Artist Count': x.artistCount,
-        'Release Count': x.releaseCount,
-        'Track Count': x.trackCount,
-        'Shop Count': x.shopCount,
-        'Country Count': x.countryCount,
         'Transaction Count': x.transactionRows,
       })),
     );
@@ -416,32 +359,7 @@ export function buildExportEntries(data: StatementData, b = buildBreakdowns(data
     throw new Error(
       `Cannot create ZIP because the ${bad.Breakdown} breakdown does not reconcile. Royalty Amount difference: ${bad['Royalty Difference']}; Amount difference: ${bad['Amount Difference']}; Sales difference: ${bad['Sales Difference']}`,
     );
-  const entries: ZipEntry[] = [];
-  entries.push({
-    name: '00-reconciliation-report.csv',
-    content: toExportCsv(report as unknown as Record<string, unknown>[], Object.keys(report[0] ?? {})),
-  });
-  const summary = statementSummaryRows(data);
-  entries.push({ name: '01-statement-summary.csv', content: toExportCsv(summary, Object.keys(summary[0] ?? {})) });
-  for (const x of b) entries.push({ name: x.file, content: toExportCsv(x.rows, x.headers) });
-  const detail = fullDetailRows(data.rows);
-  entries.push({ name: '09-full-detail.csv', content: toExportCsv(detail, Object.keys(detail[0] ?? {})) });
-  const d = data.diagnostics;
-  if (d.barcodeIntegrity?.warnings?.length)
-    entries.push({
-      name: '10-import-checks.csv',
-      content: toExportCsv(
-        d.barcodeIntegrity.warnings.map((w) => ({
-          sourceSheet: w.sourceSheet,
-          sourceRow: w.sourceRow,
-          barcodeValue: w.barcodeValue,
-          warning: w.warning,
-          suggestedReason: w.suggestedReason,
-        })),
-        ['sourceSheet', 'sourceRow', 'barcodeValue', 'warning', 'suggestedReason'],
-      ),
-    });
-  return entries;
+  return b.map((x) => ({ name: x.file, content: toExportCsv(x.rows, x.headers) }));
 }
 let crcTable: Uint32Array | undefined;
 function crc32(bytes: Uint8Array) {
@@ -545,17 +463,11 @@ export function exportFilename(data: StatementData) {
 export async function downloadBreakdownsZip(data: StatementData, onProgress?: (p: ExportProgress) => void) {
   const stages: ExportProgressStage[] = [
     'Validating totals',
-    'Preparing reconciliation report',
-    'Preparing summary',
     'Preparing artists',
     'Preparing releases',
     'Preparing tracks',
     'Preparing shops',
     'Preparing countries',
-    'Preparing sales periods',
-    'Preparing usage types',
-    'Preparing full detail',
-    'Preparing import checks',
     'Creating ZIP',
     'Complete',
   ];
@@ -563,6 +475,7 @@ export async function downloadBreakdownsZip(data: StatementData, onProgress?: (p
   const prog = (stage: ExportProgressStage) => onProgress?.({ stage, index: ++i, total: stages.length });
   prog('Validating totals');
   await Promise.resolve();
+  for (const stage of stages.slice(1, 6)) prog(stage);
   let entries = buildExportEntries(data);
   prog('Creating ZIP');
   const zip = createZip(entries);
