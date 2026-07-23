@@ -42,6 +42,7 @@ import {
   type ConverterHealth,
 } from './lib/largeExcel';
 import { technicalDetails, type ImportDebugContext } from './lib/importDiagnostics';
+import { uploadWorkbookWithProgress as uploadWorkbookXhrWithProgress } from './lib/converterUpload';
 import './styles.css';
 const tabs = [
   'Overview',
@@ -82,7 +83,11 @@ function App() {
   useEffect(() => {
     if (!conversionPrompt) return;
     const controller = new AbortController();
-    setConverterHealth({ loading: true, available: false, message: 'Checking converter availability…' });
+    setConverterHealth({
+      loading: true,
+      available: false,
+      message: 'Checking converter availability…',
+    });
     checkConverterHealth(controller.signal)
       .then((details) =>
         setConverterHealth({
@@ -546,7 +551,17 @@ function App() {
     try {
       await readLocalFileForProgress(f, conversionId, diagnostics, setConversionProgress);
       if (activeConversion.current.id !== conversionId) return;
-      await uploadWorkbookWithProgress(f, conversionId, diagnostics, setConversionProgress);
+      await uploadWorkbookXhrWithProgress({
+        file: f,
+        converterUrl: LARGE_XLSX_CONVERTER_URL,
+        activeConversion: activeConversion.current,
+        diagnostics,
+        onProgress: setConversionProgress,
+        uploadInactivityMs: Number(
+          import.meta.env.VITE_LARGE_XLSX_UPLOAD_INACTIVITY_TIMEOUT_MS || 30000,
+        ),
+        responseInactivityMs: Number(import.meta.env.VITE_LARGE_XLSX_RESPONSE_TIMEOUT_MS || 120000),
+      });
       if (activeConversion.current.id !== conversionId) return;
       setConversionProgress('Importing CSV', 0, 'Importing CSV');
       const blob = (diagnostics.csvBlob as Blob | undefined)!;
@@ -630,174 +645,6 @@ function App() {
       };
       // Read a tiny slice only to prove the browser can access the file without keeping a full XLSX copy.
       reader.readAsArrayBuffer(f.slice(0, Math.min(f.size, 64 * 1024)));
-    });
-  }
-
-  function uploadWorkbookWithProgress(
-    f: File,
-    conversionId: number,
-    diagnostics: Record<string, unknown>,
-    onProgress: (
-      stage: ImportStage,
-      fraction: number,
-      message: string,
-      extra?: Partial<ImportProgress>,
-    ) => void,
-  ) {
-    const inactivityMs = Number(
-      import.meta.env.VITE_LARGE_XLSX_UPLOAD_INACTIVITY_TIMEOUT_MS || 30000,
-    );
-    const responseMs = Number(import.meta.env.VITE_LARGE_XLSX_RESPONSE_TIMEOUT_MS || 120000);
-    const totalMs = Number(
-      import.meta.env.VITE_LARGE_XLSX_TOTAL_TIMEOUT_MS ||
-        import.meta.env.VITE_LARGE_XLSX_CONVERTER_TIMEOUT_MS ||
-        180000,
-    );
-    return new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      activeConversion.current.xhr = xhr;
-      const started = Date.now();
-      let lastUploaded = 0;
-      let inactivityTimer = 0;
-      let responseTimer = 0;
-      const resetInactivity = () => {
-        window.clearTimeout(inactivityTimer);
-        inactivityTimer = window.setTimeout(() => {
-          diagnostics.abortReason = 'upload-inactivity-timeout';
-          xhr.abort();
-          reject(
-            new Error(
-              'No upload progress was reported for 30 seconds. The request was aborted so you can retry.',
-            ),
-          );
-        }, inactivityMs);
-      };
-      const totalTimer = window.setTimeout(() => {
-        diagnostics.abortReason = 'total-conversion-timeout';
-        xhr.abort();
-        reject(new Error('The total conversion timeout elapsed.'));
-      }, totalMs);
-      xhr.timeout = responseMs;
-      xhr.upload.onprogress = (e) => {
-        const uploaded = e.loaded || lastUploaded;
-        if (uploaded > lastUploaded) resetInactivity();
-        lastUploaded = uploaded;
-        diagnostics.bytesUploaded = uploaded;
-        diagnostics.elapsedUploadMs = Date.now() - started;
-        onProgress(
-          'Uploading workbook',
-          f.size ? uploaded / f.size : 1,
-          `Uploading workbook (${formatBytes(uploaded)} of ${formatBytes(f.size)})`,
-          {
-            bytesUploaded: uploaded,
-          },
-        );
-      };
-      xhr.upload.onload = () => {
-        window.clearTimeout(inactivityTimer);
-        diagnostics.bytesUploaded = f.size;
-        diagnostics.elapsedUploadMs = Date.now() - started;
-        onProgress('Server received workbook', 1, 'Server received workbook', {
-          bytesUploaded: f.size,
-        });
-        responseTimer = window.setTimeout(() => {
-          diagnostics.abortReason = 'converter-response-timeout';
-          xhr.abort();
-          reject(new Error('The converter did not return a CSV within the response timeout.'));
-        }, responseMs);
-      };
-      xhr.onreadystatechange = () => {
-        if (
-          xhr.readyState >= XMLHttpRequest.HEADERS_RECEIVED &&
-          !diagnostics.conversionStartReceived
-        ) {
-          diagnostics.httpStatus = xhr.status;
-          diagnostics.conversionStartReceived =
-            xhr.getResponseHeader('x-conversion-started') === 'true';
-          onProgress(
-            'Converting Digital Sales worksheet',
-            0.2,
-            'Converting Digital Sales worksheet',
-          );
-        }
-      };
-      xhr.onprogress = (e) => {
-        if (xhr.status) diagnostics.httpStatus = xhr.status;
-        const loaded = e.loaded || 0;
-        diagnostics.responseSize = loaded;
-        onProgress(
-          'Downloading CSV',
-          e.lengthComputable ? loaded / e.total : 0.5,
-          `Downloading CSV (${formatBytes(loaded)})`,
-          {
-            responseBytes: loaded,
-          },
-        );
-      };
-      xhr.onload = () => {
-        window.clearTimeout(totalTimer);
-        window.clearTimeout(inactivityTimer);
-        window.clearTimeout(responseTimer);
-        diagnostics.httpStatus = xhr.status;
-        diagnostics.responseSize = xhr.response?.size ?? 0;
-        if (xhr.status < 200 || xhr.status >= 300) {
-          if (xhr.response?.size) {
-            xhr.response
-              .text()
-              .then((text: string) => {
-                try {
-                  const payload = JSON.parse(text) as {
-                    error?: string;
-                    stage?: string;
-                    details?: string;
-                  };
-                  reject(
-                    new Error(
-                      `${payload.error || `Converter HTTP ${xhr.status}`} (stage: ${
-                        payload.stage || 'unknown'
-                      })${payload.details ? ` Details: ${payload.details}` : ''}`,
-                    ),
-                  );
-                } catch {
-                  reject(new Error(`Converter HTTP ${xhr.status}: ${text.slice(0, 500)}`));
-                }
-              })
-              .catch(() => reject(new Error(`Converter HTTP ${xhr.status}`)));
-          } else reject(new Error(`Converter HTTP ${xhr.status}`));
-          return;
-        }
-        diagnostics.csvBlob = xhr.response;
-        onProgress(
-          'Downloading CSV',
-          1,
-          `Downloading CSV (${formatBytes(xhr.response?.size ?? 0)})`,
-          { responseBytes: xhr.response?.size ?? 0 },
-        );
-        resolve();
-      };
-      xhr.onerror = () => {
-        diagnostics.httpStatus = xhr.status || 0;
-        diagnostics.abortReason = 'network-failure';
-        reject(
-          new Error(
-            'Network failure: the browser could not reach the converter. Check the API route, proxy, CORS and converter health endpoint.',
-          ),
-        );
-      };
-      xhr.ontimeout = () => {
-        diagnostics.abortReason = 'converter-response-timeout';
-        reject(new Error('The converter response timed out.'));
-      };
-      xhr.onabort = () =>
-        reject(new Error(String(diagnostics.abortReason || 'conversion-cancelled')));
-      xhr.open('POST', LARGE_XLSX_CONVERTER_URL);
-      xhr.responseType = 'blob';
-      xhr.setRequestHeader(
-        'content-type',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      );
-      resetInactivity();
-      xhr.send(f);
     });
   }
 
@@ -919,7 +766,12 @@ function Upload(p: {
   cancel: () => void;
   conversionPrompt: { file: File; estimatedRows?: number } | null;
   onConvert: (f: File) => void;
-  converterHealth: { loading: boolean; available: boolean; message: string; details?: ConverterHealth };
+  converterHealth: {
+    loading: boolean;
+    available: boolean;
+    message: string;
+    details?: ConverterHealth;
+  };
 }) {
   if (p.conversionPrompt && p.file)
     return (
@@ -944,7 +796,9 @@ function Upload(p: {
             <p>No statement analysis is performed on the server.</p>
             <p>All summaries and calculations continue to happen locally in your browser.</p>
           </aside>
-          <p className={p.converterHealth.available ? 'note' : 'error'}>{p.converterHealth.message}</p>
+          <p className={p.converterHealth.available ? 'note' : 'error'}>
+            {p.converterHealth.message}
+          </p>
           {p.converterHealth.details && (
             <dl>
               <dt>Worksheet</dt>
