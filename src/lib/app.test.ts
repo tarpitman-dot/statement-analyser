@@ -1338,7 +1338,7 @@ describe('barcode integrity and statement health', () => {
   });
 });
 
-describe('complete ZIP breakdown export', () => {
+describe('default ZIP breakdown export', () => {
   const makeZipRow = (i: number, over: any = {}) => ({
     sourceSheet: 'Digital Sales',
     sourceRow: i,
@@ -1390,42 +1390,21 @@ describe('complete ZIP breakdown export', () => {
     const next = all.indexOf('PK\x01\x02', after);
     return all.slice(after, next > after ? next : undefined);
   }
-  it('creates an on-demand ZIP with all complete available breakdown CSVs and report', async () => {
+  it('creates an on-demand ZIP with exactly the five default breakdown CSVs', async () => {
     const { buildExportEntries, createZip } = await import('./exportZip');
     const sample = sampleStatement();
+    const expectedNames = [
+      '01-artists.csv',
+      '02-releases.csv',
+      '03-tracks.csv',
+      '04-shops.csv',
+      '05-countries.csv',
+    ];
     const entries = buildExportEntries(sample);
-    expect(entries.map((e) => e.name)).toEqual(
-      expect.arrayContaining([
-        '00-reconciliation-report.csv',
-        '01-statement-summary.csv',
-        '02-artists.csv',
-        '03-releases.csv',
-        '04-tracks.csv',
-        '05-shops.csv',
-        '06-countries.csv',
-        '07-sales-periods.csv',
-        '08-usage-types-or-formats.csv',
-        '09-full-detail.csv',
-      ]),
-    );
+    expect(entries.map((e) => e.name)).toEqual(expectedNames);
+    expect(new Set(entries.map((e) => e.name)).size).toBe(entries.length);
     expect(entries.every((e) => String(e.content).split('\n').length > 1)).toBe(true);
-    const zip = createZip(entries);
-    expect(zipNames(zip)).toEqual(
-      expect.arrayContaining([
-        '00-reconciliation-report.csv',
-        '01-statement-summary.csv',
-        '02-artists.csv',
-        '03-releases.csv',
-        '04-tracks.csv',
-        '05-shops.csv',
-        '06-countries.csv',
-        '07-sales-periods.csv',
-        '08-usage-types-or-formats.csv',
-        '09-full-detail.csv',
-      ]),
-    );
-    expect(fileText(zip, '00-reconciliation-report.csv')).toContain('Artists');
-    expect(fileText(zip, '00-reconciliation-report.csv')).toContain('Yes');
+    expect(zipNames(createZip(entries))).toEqual(expectedNames);
   });
   it('excludes unsupported empty field breakdowns and exports full grouped data, not top ten rows', async () => {
     const { buildExportEntries } = await import('./exportZip');
@@ -1446,14 +1425,14 @@ describe('complete ZIP breakdown export', () => {
     };
     const entries = buildExportEntries(data);
     expect(entries.map((e) => e.name)).not.toEqual(
-      expect.arrayContaining(['05-shops.csv', '06-countries.csv', '07-sales-periods.csv']),
+      expect.arrayContaining(['04-shops.csv', '05-countries.csv']),
     );
-    const artists = String(entries.find((e) => e.name === '02-artists.csv')?.content);
+    const artists = String(entries.find((e) => e.name === '01-artists.csv')?.content);
     expect(artists.split('\n')).toHaveLength(16);
     expect(artists).toContain('Artist 14');
   });
-  it('reconciles all complete grouped exports and documents track bundle exceptions', async () => {
-    const { buildExportEntries } = await import('./exportZip');
+  it('reconciles all default grouped exports and documents track bundle exceptions', async () => {
+    const { buildBreakdowns } = await import('./exportZip');
     const rows = [
       makeZipRow(1),
       makeZipRow(2, {
@@ -1475,19 +1454,12 @@ describe('complete ZIP breakdown export', () => {
         reportingPeriod: 'period',
       },
     };
-    const report = String(
-      buildExportEntries(data).find((e) => e.name === '00-reconciliation-report.csv')?.content,
+    const breakdowns = buildBreakdowns(data);
+    for (const label of ['Artists', 'Releases', 'Shops', 'Countries'])
+      expect(breakdowns.find((b) => b.label === label)?.recon?.Reconciles).toBe('Yes');
+    expect(breakdowns.find((b) => b.label === 'Tracks')?.recon?.Notes).toBe(
+      'Tracks exclude bundle/non-track rows under existing track rules.',
     );
-    for (const label of [
-      'Artists',
-      'Releases',
-      'Shops',
-      'Countries',
-      'Sales Periods',
-      'Usage Types',
-    ])
-      expect(report).toMatch(new RegExp(`"${label}".*"Yes"`));
-    expect(report).toContain('Tracks exclude bundle/non-track rows under existing track rules.');
   });
   it('blocks ZIP creation on reconciliation failure and reports exact differences', async () => {
     const mod = await import('./exportZip');
@@ -1522,7 +1494,7 @@ describe('complete ZIP breakdown export', () => {
     };
     expect(() => mod.buildExportEntries(data, original as any)).toThrow(/does not reconcile.*-2/);
   });
-  it('preserves full detail rows, barcode text, identifiers and plain money values without scientific notation', async () => {
+  it('preserves retained CSV barcode text, identifiers and plain money values without scientific notation', async () => {
     const { buildExportEntries } = await import('./exportZip');
     const rows = [
       makeZipRow(1, { barcode: '0012345678901', amount: '10.123456', royaltyAmount: '8.7654321' }),
@@ -1540,13 +1512,14 @@ describe('complete ZIP breakdown export', () => {
       },
     };
     const entries = buildExportEntries(data);
-    const detail = String(entries.find((e) => e.name === '09-full-detail.csv')?.content);
-    expect(detail.split('\n')).toHaveLength(2);
-    expect(detail).toContain('"=""0012345678901"""');
-    expect(detail).not.toMatch(/\dE\+\d/i);
-    expect(detail).not.toContain('£');
-    expect(detail).toContain('10.123456');
-    expect(detail).toContain('8.7654321');
+    expect(entries.map((e) => e.name)).not.toContain('09-full-detail.csv');
+    const releases = String(entries.find((e) => e.name === '02-releases.csv')?.content);
+    expect(releases.split('\n')).toHaveLength(2);
+    expect(releases).toContain('"=""0012345678901"""');
+    expect(releases).not.toMatch(/\dE\+\d/i);
+    expect(releases).not.toContain('£');
+    expect(releases).toContain('10.123456');
+    expect(releases).toContain('8.7654321');
   });
   it('downloads only when clicked, revokes Blob URLs, and clears entry references after creating the ZIP', async () => {
     const { downloadBreakdownsZip } = await import('./exportZip');
@@ -1573,11 +1546,23 @@ describe('complete ZIP breakdown export', () => {
       return el;
     }) as any);
     expect(created).toBe(0);
-    await downloadBreakdownsZip(sample);
+    const progress: any[] = [];
+    await downloadBreakdownsZip(sample, (p) => progress.push(p));
     await new Promise((r) => setTimeout(r, 1));
     expect(created).toBe(1);
     expect(clicked).toBe(1);
     expect(revoked).toBe(1);
+    expect(progress.map((p) => p.stage)).toEqual([
+      'Validating totals',
+      'Preparing artists',
+      'Preparing releases',
+      'Preparing tracks',
+      'Preparing shops',
+      'Preparing countries',
+      'Creating ZIP',
+      'Complete',
+    ]);
+    expect(progress.every((p) => p.total === 8)).toBe(true);
     vi.restoreAllMocks();
   });
   it('creates a large synthetic statement ZIP without retaining every CSV as a separate generated ZIP', async () => {
@@ -1596,10 +1581,13 @@ describe('complete ZIP breakdown export', () => {
       },
     };
     const entries = buildExportEntries(data);
-    expect(entries.find((e) => e.name === '09-full-detail.csv')).toBeTruthy();
-    expect(
-      String(entries.find((e) => e.name === '09-full-detail.csv')?.content).split('\n'),
-    ).toHaveLength(1001);
+    expect(entries.map((e) => e.name)).toEqual([
+      '01-artists.csv',
+      '02-releases.csv',
+      '03-tracks.csv',
+      '04-shops.csv',
+      '05-countries.csv',
+    ]);
     expect(createZip(entries).length).toBeGreaterThan(1000);
   });
 });
