@@ -66,6 +66,8 @@ export async function handleConvert(req, res) {
       'content-type': 'text/csv; charset=utf-8',
       'cache-control': 'no-store',
       'x-converter-cleanup': 'temporary-files-deleted',
+      'x-conversion-started': 'true',
+      'x-upload-bytes-received': String(body.length),
     });
     res.end(csv);
   } catch (error) {
