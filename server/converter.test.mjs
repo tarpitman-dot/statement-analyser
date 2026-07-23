@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as XLSX from 'xlsx';
-import { workbookToDigitalSalesCsv, selectDigitalSalesSheet, handleConvert } from './converter.mjs';
+import {
+  workbookToDigitalSalesCsv,
+  selectDigitalSalesSheet,
+  handleConvert,
+  healthPayload,
+} from './converter.mjs';
 
 function bytes(sheetName = 'Digital Sales') {
   const wb = XLSX.utils.book_new();
@@ -19,7 +24,8 @@ describe('converter service', () => {
   it('selects Digital Sales case-insensitively and downloads identifier-safe CSV', () => {
     const wb = XLSX.read(bytes('digital sales'), { type: 'buffer' });
     expect(selectDigitalSalesSheet(wb)).toBe('digital sales');
-    const csv = workbookToDigitalSalesCsv(bytes('digital sales'));
+    const { csv, sheetName } = workbookToDigitalSalesCsv(bytes('digital sales'));
+    expect(sheetName).toBe('digital sales');
     expect(csv).toContain('0012345678901');
     expect(csv).toContain('CAT-001');
   });
@@ -30,6 +36,15 @@ describe('converter service', () => {
     );
   });
 
+  it('reports converter health metadata', () => {
+    expect(healthPayload()).toMatchObject({
+      status: 'ok',
+      maxUploadBytes: expect.any(Number),
+      converterVersion: expect.any(String),
+      supportedWorksheet: 'Digital Sales',
+    });
+  });
+
   it('cleans up temporary files after upload handling', async () => {
     const chunks = [bytes()];
     const fakeReq = {
@@ -37,6 +52,7 @@ describe('converter service', () => {
         yield* chunks;
       },
       destroy: vi.fn(),
+      headers: { 'content-length': String(chunks[0].length) },
     };
     const fakeRes = { writeHead: vi.fn(), end: vi.fn() };
     await handleConvert(fakeReq, fakeRes);
