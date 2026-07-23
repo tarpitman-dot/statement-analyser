@@ -1,229 +1,20 @@
-import { describe, it, expect, vi } from 'vitest';
-import * as XLSX from 'xlsx';
-import { detectHeaderRow, parseWorkbook, normaliseIdentifier, parseRoyaltyRate } from './parser';
-import { clampProgress, isLargeFile, IMPORT_STAGES } from './importProgress';
-import { fieldLabels } from './columnAliases';
-import { toCsv } from './exportCsv';
-import { D, fmtRate, fmtMoney } from './format';
-import { sampleStatement } from './sampleData';
-import { ensureImportTimings, recordTiming, recordTimingValue, safeNow } from './timing';
-import {
-  groupArtists,
-  groupReleases,
-  groupTracks,
-  groupBy,
-  groupRoyaltyRates,
-  rateSummary,
-  importCheckGroups,
-  periodSortValue,
-  searchRows,
-  totals,
-  groupedReconciliation,
-  isTrackRow,
-  prepareOverviewChartData,
-  chartDatasetCacheKey,
-  prepareOverviewChartDataFromRows,
-  overviewChartDataForRows,
-} from './analytics';
-const headers = Object.values(fieldLabels);
-const row = [
-  'C1',
-  'Contract',
-  '',
-  'Track',
-  'R1',
-  'Release A',
-  'CAT-001',
-  '1234567890123',
-  'ISRC1',
-  'Artist A',
-  'Track A',
-  'Track Stream',
-  'GB',
-  'Shop A',
-  '2026-06',
-  '10',
-  '1',
-  '0.1',
-  '1.20',
-  '',
-  '',
-  '',
-  '',
-  '',
-  '',
-  '',
-  '',
-  '',
-  '',
-  '0.85',
-  '1.02',
-];
-function wb(aoa: any[][], name = 'Digital Sales') {
-  const w = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(w, XLSX.utils.aoa_to_sheet(aoa), name);
-  return w;
-}
-describe('parsing', () => {
-  it('detects header row and known Details columns', () => {
-    const h = detectHeaderRow([['title'], headers]);
-    expect(h?.idx).toBe(1);
-    expect(h?.map.get('royaltyAmount')).toBe(30);
-  });
-  it('handles aliases, blank sheets, reordered columns, numeric/currency strings and csv-like workbooks', () => {
-    const w = wb([[]], 'Blank');
-    XLSX.utils.book_append_sheet(
-      w,
-      XLSX.utils.aoa_to_sheet([
-        ['x'],
-        [
-          'Artist',
-          'Release Title',
-          'Track Title',
-          'Revenue Amount',
-          'Label Earnings',
-          'Cat Number',
-          'EAN',
-        ],
-        ['A', 'R', 'T', '£1,000.10', '850.085', '00001', '1.23457E+12'],
-      ]),
-      'Other',
-    );
-    const s = parseWorkbook(w, 'KIKA___2026_06_01___2026_06_30-4.xlsx', 123);
-    expect(s.diagnostics.worksheetsIgnored[0]).toContain('blank');
-    expect(s.diagnostics.account).toBe('KIKA');
-    expect(s.rows[0].catalogNumber).toBe('00001');
-    expect(s.rows[0].barcode).toBe('1234570000000');
-    expect(D(s.rows[0].amount).toString()).toBe('1000.1');
-  });
-  it('throws clear missing required error', () =>
-    expect(() => parseWorkbook(wb([['Artist'], ['A']]))).toThrow(/missing/));
-  it('normalises scientific identifiers', () =>
-    expect(normaliseIdentifier('1.23E+5')).toBe('123000'));
-  it('parses royalty rates from decimals, numbers and percentages', () => {
-    expect(parseRoyaltyRate('100%')?.toString()).toBe('1');
-    expect(parseRoyaltyRate('100.00%')?.toString()).toBe('1');
-    expect(parseRoyaltyRate('85%')?.toString()).toBe('0.85');
-    expect(parseRoyaltyRate('85.0%')?.toString()).toBe('0.85');
-    expect(parseRoyaltyRate(' 1,000.00% ')?.toString()).toBe('10');
-    expect(parseRoyaltyRate(0.85)?.toString()).toBe('0.85');
-    expect(parseRoyaltyRate(1)?.toString()).toBe('1');
-    expect(parseRoyaltyRate(85)?.toString()).toBe('0.85');
-    expect(parseRoyaltyRate('not a rate')).toBeNull();
-  });
-  it('normalises percentage royalty rates and records invalid rates without throwing', () => {
-    const percent = [...row];
-    percent[29] = '100.00%';
-    percent[30] = '1.20';
-    const invalid = [...row];
-    invalid[29] = 'bad%';
-    const s = parseWorkbook(wb([headers, percent, invalid]));
-    expect(s.rows[0].royaltyRate).toBe('1');
-    expect(s.rows[1].royaltyRate).toBe('');
-    expect(s.diagnostics.invalidNumericValues[0]).toContain('Royalty Rate could not be parsed');
-  });
-});
-describe('calculations and grouping', () => {
-  const s = parseWorkbook(
-    wb([
-      headers,
-      row,
-      [
-        ...row.slice(0, 7),
-        '1234567890123',
-        'ISRC2',
-        'Artist A',
-        'Track B',
-        'Bundle DL',
-        'US',
-        'Shop B',
-        '2026_05',
-        '5',
-        '0',
-        '0.2',
-        '2.00',
-        '',
-        '',
-        '',
-        '-0.1',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '-0.2',
-        '0.80',
-        '1.60',
-      ],
-      [
-        ...row.slice(0, 6),
-        'CAT-002',
-        '',
-        '',
-        'Artist B',
-        'Bundle',
-        'Bundle DL',
-        'GB',
-        'Shop A',
-        '202605',
-        '1',
-        '0',
-        '',
-        '3.00',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '0.85',
-        '2.55',
-      ],
-    ]),
-  );
-  it('uses decimal-safe totals', () => {
-    const t = totals(s.rows);
-    expect(t.amount.toString()).toBe('6.2');
-    expect(t.royaltyAmount.toString()).toBe('5.17');
-    expect(t.sales.toString()).toBe('16');
-    expect(t.returns.toString()).toBe('1');
-    expect(t.deductions.toString()).toBe('-0.3');
-    expect(t.lineCharges.toString()).toBe('-0.2');
-  });
-  it('formats rates', () => {
-    expect(fmtRate('0.85')).toBe('85%');
-    expect(new Set(s.rows.map((r) => r.royaltyRate)).size).toBe(2);
-  });
-  it('groups artists/releases/tracks/shops/countries and excludes blank bundle ISRC track', () => {
-    expect(groupArtists(s.rows)[0].artist).toBe('Artist A');
-    expect(groupReleases(s.rows).length).toBe(2);
-    expect(groupTracks(s.rows).length).toBe(2);
-    expect(groupBy(s.rows, 'shop').length).toBe(2);
-    expect(groupBy(s.rows, 'country').length).toBe(2);
-    expect(['2026-05', '2026-06']).toEqual(
-      ['2026_05', '2026-06']
-        .sort((a, b) => periodSortValue(a).localeCompare(periodSortValue(b)))
-        .map(periodSortValue),
-    );
-  });
-  it('searches only the selected source field and supports exact identifiers', () => {
-    expect(searchRows(s.rows, 'artist', 'Release A').length).toBe(0);
-    expect(searchRows(s.rows, 'albumTitle', 'Release A').length).toBe(3);
-    expect(searchRows(s.rows, 'trackTitle', 'Track A').length).toBe(1);
-    expect(searchRows(s.rows, 'catalogNumber', 'CAT-001', true).length).toBe(2);
-    expect(searchRows(s.rows, 'barcode', '1234567890123', true).length).toBe(2);
-    expect(searchRows(s.rows, 'isrc', 'ISRC1', true).length).toBe(1);
-  });
-  it('classifies validation and duplicates', () => {
-    expect(s.diagnostics.royaltyValidation.matches).toBeGreaterThan(0);
-    expect(s.diagnostics.royaltyValidation.notChecked).toBeGreaterThan(0);
-    const dup = parseWorkbook(wb([headers, row, row]));
-    expect(dup.diagnostics.duplicateLookingRows).toBe(2);
-  });
+import {describe,it,expect,vi,afterEach} from 'vitest';import * as XLSX from 'xlsx';import {detectHeaderRow,parseWorkbook,normaliseIdentifier,parseRoyaltyRate} from './parser';import {clampProgress,isLargeFile,IMPORT_STAGES} from './importProgress';import {fieldLabels} from './columnAliases';import {toCsv} from './exportCsv';import {D,fmtRate,fmtMoney} from './format';import {sampleStatement} from './sampleData';import {ensureImportTimings,recordTiming,recordTimingValue,safeNow} from './timing';import {groupArtists,groupReleases,groupTracks,groupBy,groupRoyaltyRates,rateSummary,importCheckGroups,periodSortValue,searchRows,totals,groupedReconciliation,isTrackRow,prepareOverviewChartData,chartDatasetCacheKey,prepareOverviewChartDataFromRows,overviewChartDataForRows} from './analytics';
+const headers=Object.values(fieldLabels);const row=['C1','Contract','', 'Track','R1','Release A','CAT-001','1234567890123','ISRC1','Artist A','Track A','Track Stream','GB','Shop A','2026-06','10','1','0.1','1.20','','','','','','','','','','','0.85','1.02'];
+function wb(aoa:any[][],name='Digital Sales'){const w=XLSX.utils.book_new();XLSX.utils.book_append_sheet(w,XLSX.utils.aoa_to_sheet(aoa),name);return w}
+describe('parsing',()=>{it('detects header row and known Details columns',()=>{const h=detectHeaderRow([['title'],headers]);expect(h?.idx).toBe(1);expect(h?.map.get('royaltyAmount')).toBe(30)});it('handles aliases, blank sheets, reordered columns, numeric/currency strings and csv-like workbooks',()=>{const w=wb([[]],'Blank');XLSX.utils.book_append_sheet(w,XLSX.utils.aoa_to_sheet([['x'],['Artist','Release Title','Track Title','Revenue Amount','Label Earnings','Cat Number','EAN'],['A','R','T','£1,000.10','850.085','00001','1.23457E+12']]),'Other');const s=parseWorkbook(w,'KIKA___2026_06_01___2026_06_30-4.xlsx',123);expect(s.diagnostics.worksheetsIgnored[0]).toContain('blank');expect(s.diagnostics.account).toBe('KIKA');expect(s.rows[0].catalogNumber).toBe('00001');expect(s.rows[0].barcode).toBe('1234570000000');expect(D(s.rows[0].amount).toString()).toBe('1000.1')});it('throws clear missing required error',()=>expect(()=>parseWorkbook(wb([['Artist'],['A']]))).toThrow(/missing/));it('normalises scientific identifiers',()=>expect(normaliseIdentifier('1.23E+5')).toBe('123000'));it('parses royalty rates from decimals, numbers and percentages',()=>{expect(parseRoyaltyRate('100%')?.toString()).toBe('1');expect(parseRoyaltyRate('100.00%')?.toString()).toBe('1');expect(parseRoyaltyRate('85%')?.toString()).toBe('0.85');expect(parseRoyaltyRate('85.0%')?.toString()).toBe('0.85');expect(parseRoyaltyRate(' 1,000.00% ')?.toString()).toBe('10');expect(parseRoyaltyRate(0.85)?.toString()).toBe('0.85');expect(parseRoyaltyRate(1)?.toString()).toBe('1');expect(parseRoyaltyRate(85)?.toString()).toBe('0.85');expect(parseRoyaltyRate('not a rate')).toBeNull()});it('normalises percentage royalty rates and records invalid rates without throwing',()=>{const percent=[...row];percent[29]='100.00%';percent[30]='1.20';const invalid=[...row];invalid[29]='bad%';const s=parseWorkbook(wb([headers,percent,invalid]));expect(s.rows[0].royaltyRate).toBe('1');expect(s.rows[1].royaltyRate).toBe('');expect(s.diagnostics.invalidNumericValues[0]).toContain('Royalty Rate could not be parsed')})});
+describe('calculations and grouping',()=>{const s=parseWorkbook(wb([headers,row,[...row.slice(0,7),'1234567890123','ISRC2','Artist A','Track B','Bundle DL','US','Shop B','2026_05','5','0','0.2','2.00','','','','-0.1','','','','','','-0.2','0.80','1.60'],[...row.slice(0,6),'CAT-002','','','Artist B','Bundle','Bundle DL','GB','Shop A','202605','1','0','','3.00','','','','','','','','','','','0.85','2.55']]));it('uses decimal-safe totals',()=>{const t=totals(s.rows);expect(t.amount.toString()).toBe('6.2');expect(t.royaltyAmount.toString()).toBe('5.17');expect(t.sales.toString()).toBe('16');expect(t.returns.toString()).toBe('1');expect(t.deductions.toString()).toBe('-0.3');expect(t.lineCharges.toString()).toBe('-0.2')});it('formats rates',()=>{expect(fmtRate('0.85')).toBe('85%');expect(new Set(s.rows.map(r=>r.royaltyRate)).size).toBe(2)});it('groups artists/releases/tracks/shops/countries and excludes blank bundle ISRC track',()=>{expect(groupArtists(s.rows)[0].artist).toBe('Artist A');expect(groupReleases(s.rows).length).toBe(2);expect(groupTracks(s.rows).length).toBe(2);expect(groupBy(s.rows,'shop').length).toBe(2);expect(groupBy(s.rows,'country').length).toBe(2);expect(['2026-05','2026-06']).toEqual(['2026_05','2026-06'].sort((a,b)=>periodSortValue(a).localeCompare(periodSortValue(b))).map(periodSortValue))});it('searches only the selected source field and supports exact identifiers',()=>{expect(searchRows(s.rows,'artist','Release A').length).toBe(0);expect(searchRows(s.rows,'albumTitle','Release A').length).toBe(3);expect(searchRows(s.rows,'trackTitle','Track A').length).toBe(1);expect(searchRows(s.rows,'catalogNumber','CAT-001',true).length).toBe(2);expect(searchRows(s.rows,'barcode','1234567890123',true).length).toBe(2);expect(searchRows(s.rows,'isrc','ISRC1',true).length).toBe(1)});it('classifies validation and duplicates',()=>{expect(s.diagnostics.royaltyValidation.matches).toBeGreaterThan(0);expect(s.diagnostics.royaltyValidation.notChecked).toBeGreaterThan(0);const dup=parseWorkbook(wb([headers,row,row]));expect(dup.diagnostics.duplicateLookingRows).toBe(2)})});
+
+describe('large import progress helpers',()=>{it('keeps stages ordered and progress monotonic',()=>{let p=0;for(const stage of IMPORT_STAGES){const n=clampProgress(p,stage,1);expect(n).toBeGreaterThanOrEqual(p);p=n}expect(p).toBe(100)});it('enables Large File Mode by size or estimated rows',()=>{expect(isLargeFile(11*1024*1024,1)).toBe(true);expect(isLargeFile(1,50001)).toBe(true);expect(isLargeFile(1,50000)).toBe(false)});it('chunks large rows, defers duplicates and drops raw row copies',()=>{const rows=Array.from({length:5001},(_,i)=>[...row.slice(0,15),String(i+1),'0','0.1','1.00','','','','','','','','','','','0.85','0.85']);const events:any[]=[];const s=parseWorkbook(wb([headers,...rows]),'large.xlsx',11*1024*1024,{onProgress:e=>events.push(e)});expect(s.diagnostics.largeFileMode).toBe(true);expect(events.filter(e=>e.stage==='Importing transactions').length).toBeGreaterThan(1);expect(s.rows[0].originalRow).toBeUndefined();expect(s.diagnostics.duplicateLookingRows).toBe(0);expect(s.diagnostics.initialSummary?.transactionCount).toBe(5001);expect(events.at(-1).percent).toBe(100)});it('row-level problems do not stop full import',()=>{const bad=[...row];bad[29]='bad%';const s=parseWorkbook(wb([headers,bad,row]));expect(s.rows.length).toBe(2);expect(s.diagnostics.invalidNumericValues.length).toBeGreaterThan(0)})});
+
+describe('grouped export reconciliation regressions',()=>{
+  const tx=(i:number,over:Partial<any>={})=>({sourceSheet:'s',sourceRow:i,contractId:'',contractName:'',shareContract:'',assetType:'Track',releaseCode:`R${i%5}`,albumTitle:`Release ${i%7}`,catalogNumber:`CAT${i%7}`,barcode:`BC${i%7}`,isrc:`ISRC${i}`,artist:`Artist ${i%23}`,trackTitle:`Track ${i%9}`,usageType:i%2?'Stream':'Download',country:i%3===0?'GB':'US',shop:`Shop ${i%25}`,salesPeriod:`2026-${String((i%4)+1).padStart(2,'0')}`,sales:String(i+1),returns:String(i%2),ppu:'0.0001',amount:(0.10001+i/1000).toString(),share:'',rata1:'',rata2:'',deduction1:'',deduction2:'',deduction3:'',contractDeductions:'',deduction4:'',deduction5:'',lineCharges:'',royaltyRate:'0.85',royaltyAmount:(0.0850085+i/10000).toString(),...over});
+  const rows=Array.from({length:55},(_,i)=>tx(i,i===3?{shop:''}:i===4?{artist:'',country:'',salesPeriod:'',usageType:''}:{}));
+  function expectRecon(groups:any[], subset=rows){const r=groupedReconciliation(subset,groups);expect(r.reconciled).toBe(true);expect(r.grouped.royaltyAmount.toString()).toBe(r.dashboard.royaltyAmount.toString());expect(r.grouped.amount.toString()).toBe(r.dashboard.amount.toString());expect(r.grouped.sales.toString()).toBe(r.dashboard.sales.toString());expect(r.grouped.returns.toString()).toBe(r.dashboard.returns.toString());}
+  it('shop export source contains every shop beyond top 10 and reconciles independently of chart data',()=>{const all=groupBy(rows,'shop');const top10=all.slice(0,10);expect(all.length).toBeGreaterThan(20);expect(top10.length).toBe(10);expect(all.map(g=>g.shop)).toContain('Unspecified shop');expectRecon(all);expect(groupedReconciliation(rows,top10).reconciled).toBe(false)});
+  it('all grouped summaries reconcile to dashboard totals including blanks',()=>{for(const groups of [groupArtists(rows),groupReleases(rows),groupTracks(rows),groupBy(rows,'country'),groupBy(rows,'salesPeriod'),groupBy(rows,'usageType'),groupBy(rows,'royaltyRate')])expectRecon(groups);expect(groupArtists(rows).map(g=>g.artist)).toContain('Unspecified artist');expect(groupBy(rows,'country').map(g=>g.country)).toContain('Unspecified country');expect(groupBy(rows,'salesPeriod').map(g=>g.salesPeriod)).toContain('Unspecified sales period');expect(groupBy(rows,'usageType').map(g=>g.usageType)).toContain('Unspecified usage type')});
+  it('pagination and visual table limits do not limit complete-summary exports',()=>{const all=groupBy(rows,'shop');const page=all.slice(0,10);expect(page.length).toBeLessThan(all.length);expectRecon(all);expect(groupedReconciliation(rows,page).grouped.royaltyAmount.toString()).not.toBe(totals(rows).royaltyAmount.toString())});
+  it('global filters affect dashboard and exports consistently while preserving decimal precision',()=>{const filtered=rows.filter(r=>r.country==='GB');const groups=groupBy(filtered,'shop');expect(filtered.length).toBeGreaterThan(0);expectRecon(groups,filtered);expect(totals(filtered).royaltyAmount.decimalPlaces()).toBeGreaterThan(2)});
+  it('CSV grouped totals are numeric strings without currency symbols',()=>{const groups=groupBy(rows,'shop');const csv=toCsv([...groups.map(g=>({shop:g.shop,royaltyAmount:g.royaltyAmount.toString(),amount:g.amount.toString(),sales:g.sales.toString(),returns:g.returns.toString()})),{shop:'TOTAL',royaltyAmount:totals(rows).royaltyAmount.toString(),amount:totals(rows).amount.toString(),sales:totals(rows).sales.toString(),returns:totals(rows).returns.toString()}],['shop','royaltyAmount','amount','sales','returns']);expect(csv).toContain('TOTAL');expect(csv).not.toContain('£');expect(csv).toMatch(/"\d+\.\d+"/)});
 });
 
 describe('large import progress helpers', () => {
@@ -1601,5 +1392,45 @@ describe('complete ZIP breakdown export', () => {
       String(entries.find((e) => e.name === '09-full-detail.csv')?.content).split('\n'),
     ).toHaveLength(1001);
     expect(createZip(entries).length).toBeGreaterThan(1000);
+  });
+});
+
+import React from 'react';
+import {act,cleanup,fireEvent,render,screen} from '@testing-library/react';
+import {Dashboard,useProgressiveSearchIndexes} from '../main';
+
+describe('latest review regressions',()=>{
+  const make=(over:any={})=>({sourceSheet:'s',sourceRow:1,contractId:'',contractName:'',shareContract:'',assetType:'Track',releaseCode:'R',albumTitle:'Release',catalogNumber:'CAT',barcode:'BC',isrc:'ISRC',artist:'Artist',trackTitle:'Track',usageType:'Track Stream',country:'GB',shop:'Shop',salesPeriod:'2026-06',sales:'1',returns:'0',ppu:'',amount:'10',share:'',rata1:'',rata2:'',deduction1:'',deduction2:'',deduction3:'',contractDeductions:'',deduction4:'',deduction5:'',lineCharges:'',royaltyRate:'0.85',royaltyAmount:'8.5',...over});
+  const diagnostics=()=>({filename:'t.xlsx',fileSize:1,worksheetsDetected:['Digital Sales'],worksheetsImported:['Digital Sales'],worksheetsIgnored:[],headerRows:{},transactionRows:0,blankRowsIgnored:0,detectedColumns:[],missingOptionalColumns:[],missingRequiredColumns:[],invalidNumericValues:[],unclassifiedDateValues:[],blankArtistValues:0,blankReleaseValues:0,blankIsrcValues:0,bundleRowsWithBlankIsrc:0,duplicateLookingRows:0,royaltyValidation:{matches:0,requiresReview:0,notChecked:0},barcodeIntegrity:{warnings:[]},statementHealth:{},initialSummary:{uniqueArtistCount:99,uniqueReleaseCount:99,uniqueTrackCount:99,totalRoyaltyAmount:'17',totalAmount:'20',totalSales:'2',totalDeductions:'0',transactionCount:2,royaltyRateSummary:'85%'}});
+  afterEach(()=>{vi.useRealTimers();cleanup()});
+
+  it('keeps disabled search indexing idle across ordinary renders and leaves no timers',()=>{
+    vi.useFakeTimers();let renders=0;function Probe({rows,enabled}:{rows:any[];enabled:boolean}){renders++;useProgressiveSearchIndexes(rows,diagnostics(),enabled);return React.createElement('button',null,'rendered')}
+    const {rerender}=render(React.createElement(Probe,{rows:[],enabled:false}));act(()=>vi.runOnlyPendingTimers());rerender(React.createElement(Probe,{rows:[],enabled:false}));rerender(React.createElement(Probe,{rows:[],enabled:false}));act(()=>vi.runOnlyPendingTimers());expect(renders).toBe(3);expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('builds indexes when quick search opens and clears once with no retained timers when it closes',async()=>{
+    vi.useFakeTimers();const rows=[make({artist:'Needle'}),make({artist:'Other'})];const diag=diagnostics();let latest:any;function Probe({enabled}:{enabled:boolean}){latest=useProgressiveSearchIndexes(enabled?rows:[],diag,enabled);return React.createElement('p',null,Object.keys(latest).join('|')||'empty')}
+    const {rerender}=render(React.createElement(Probe,{enabled:false}));expect(screen.getByText('empty')).toBeTruthy();rerender(React.createElement(Probe,{enabled:true}));await act(async()=>{await vi.runAllTimersAsync()});expect(latest.artist.get('needle')).toEqual([0]);expect(Object.keys(latest).length).toBeGreaterThan(0);rerender(React.createElement(Probe,{enabled:false}));await act(async()=>{vi.runOnlyPendingTimers()});expect(Object.keys(latest)).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);rerender(React.createElement(Probe,{enabled:false}));await act(async()=>{vi.runOnlyPendingTimers()});expect(Object.keys(latest)).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);rerender(React.createElement(Probe,{enabled:true}));await act(async()=>{await vi.runAllTimersAsync()});expect(latest.artist.get('needle')).toEqual([0]);
+  });
+
+  it('does not keep index-building timers active when search closes mid-build',()=>{
+    vi.useFakeTimers();const rows=[make({artist:'Needle',albumTitle:'Album'})];function Probe({enabled}:{enabled:boolean}){useProgressiveSearchIndexes(enabled?rows:[],diagnostics(),enabled);return React.createElement('p',null,'ok')}
+    const {rerender}=render(React.createElement(Probe,{enabled:true}));expect(vi.getTimerCount()).toBe(1);rerender(React.createElement(Probe,{enabled:false}));expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('uses initial counts only when unfiltered and recalculates overview counts immediately when filtered',()=>{
+    const rows=[make({artist:'Artist A',albumTitle:'Release A',barcode:'BCA',isrc:'ISRCA',country:'GB'}),make({artist:'Artist B',albumTitle:'Release B',barcode:'BCB',isrc:'ISRCB',country:'US'})];const data:any={label:'Test',filename:'test.xlsx',fileSize:1,rows,diagnostics:diagnostics()};render(React.createElement(Dashboard,{data,remove:()=>{}}));expect(screen.getAllByText('99')).toHaveLength(3);fireEvent.click(screen.getByText(/Global filters/));fireEvent.change(screen.getByLabelText('Country'),{target:{value:'GB'}});expect(screen.getAllByText('1').length).toBeGreaterThanOrEqual(4);expect(screen.queryByText('99')).toBeNull();expect(data.diagnostics.importTimings?.tabFirstCalculationMs?.Artists).toBeUndefined();expect(data.diagnostics.importTimings?.tabFirstCalculationMs?.Releases).toBeUndefined();expect(data.diagnostics.importTimings?.tabFirstCalculationMs?.Tracks).toBeUndefined();
+  });
+
+  it('preserves worksheet diagnostics independently while releasing workbook sheets',async()=>{
+    const parser=await import('./parser');const workbook=wb([headers,row],'Digital Sales');XLSX.utils.book_append_sheet(workbook,XLSX.utils.aoa_to_sheet([[]]),'Blank Sheet');const data=parser.parseWorkbook(workbook,'mock.xlsx',8);expect(data.diagnostics.worksheetsDetected).toEqual(['Digital Sales','Blank Sheet']);expect(data.diagnostics.worksheetsDetected).not.toBe(workbook.SheetNames);parser.releaseWorkbookForMemory(workbook);expect(workbook.SheetNames).toEqual([]);expect(workbook.Sheets['Digital Sales']).toBeUndefined();workbook.SheetNames.push('Mutated');expect(data.diagnostics.worksheetsDetected).toEqual(['Digital Sales','Blank Sheet']);const bytes=XLSX.write(wb([headers,row],'Digital Sales'),{type:'array',bookType:'xlsx'});await expect(parser.parseArrayBuffer(bytes,'real.xlsx',bytes.byteLength)).resolves.toMatchObject({diagnostics:{worksheetsDetected:['Digital Sales']}});
+  });
+
+  it('keeps release contributing artists to genuine nonblank artists only',()=>{
+    const populated=groupReleases([make({artist:'Real Artist'})])[0];expect(populated.artist).toBe('Real Artist');expect(populated.artists).toEqual(['Real Artist']);
+    const blank=groupReleases([make({artist:''})])[0];expect(blank.artist).toBe('Unspecified artist');expect(blank.artists).toEqual([]);
+    const mixed=groupReleases([make({artist:'Real Artist'}),make({artist:'',sourceRow:2})])[0];expect(mixed.artist).toBe('Real Artist');expect(mixed.artists).toEqual(['Real Artist']);expect(mixed.hasMultipleIdentifiers).toBe(false);const csv=toCsv([{artist:mixed.artist}]);expect(csv).not.toContain('Real Artist | Unspecified artist');
+    const multiple=groupReleases([make({artist:'Real Artist'}),make({artist:'Other Artist',sourceRow:2})])[0];expect(multiple.artist).toBe('Other Artist | Real Artist');expect(multiple.hasMultipleIdentifiers).toBe(true);
   });
 });
