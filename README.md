@@ -88,3 +88,4 @@ Sales Period is when the underlying usage or sale occurred. It may be earlier th
 - The first version does not include a mapping wizard; aliases must be configured in code.
 - Charts are intentionally minimal; tables are the primary inspection interface.
 - Uploaded real statements must be manually verified before any public deployment.
+- 
