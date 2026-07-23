@@ -16,7 +16,9 @@ function postError(error: unknown, context: ImportDebugContext) {
 }
 
 self.onmessage = async (e: MessageEvent) => {
-  const { buffer, filename, fileSize, arrayBufferSizeBeforeTransfer, fileReadMs } = e.data;
+  const payload = e.data;
+  let { buffer } = payload;
+  const { filename, fileSize, arrayBufferSizeBeforeTransfer, fileReadMs } = payload;
   const base = {
     processingStage: 'Opening workbook',
     workerEvent: 'parse-start',
@@ -31,17 +33,22 @@ self.onmessage = async (e: MessageEvent) => {
   }
   for (const attempt of [1, 2]) {
     try {
-      const data = await parseArrayBuffer(buffer.slice(0), filename, fileSize, {
+      const data = await parseArrayBuffer(buffer, filename, fileSize, {
         fileReadMs,
         sheetJsReadAttempt: attempt === 1 ? 'default' : 'conservative',
         retryAttemptNumber: attempt,
         readOptions: attempt === 1 ? undefined : CONSERVATIVE_SHEETJS_READ_OPTIONS,
         onProgress: p => (self as unknown as Worker).postMessage({ type: 'progress', progress: p, context: { ...base, sheetJsReadAttempt: attempt === 1 ? 'default' : 'conservative', retryAttemptNumber: attempt } }),
       });
+      data.diagnostics.memory={...(data.diagnostics.memory??{}),workerTerminated:'No'};
+      buffer = null;
+      if (payload) payload.buffer = null;
       (self as unknown as Worker).postMessage({ type: 'complete', data, context: { ...base, processingStage: 'Complete', workerEvent: 'complete', sheetJsReadAttempt: attempt === 1 ? 'default' : 'conservative', retryAttemptNumber: attempt } });
       return;
     } catch (error) {
       if (attempt === 2) {
+        buffer = null;
+        if (payload) payload.buffer = null;
         postError(error, { ...base, workerEvent: 'error', sheetJsReadAttempt: 'conservative', retryAttemptNumber: 2 });
         return;
       }
