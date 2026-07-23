@@ -33,7 +33,7 @@ import { downloadBreakdownsZip, type ExportProgress } from './lib/exportZip';
 import { recordTiming, recordTimingValue, safeNow } from './lib/timing';
 import type { StatementData, Transaction } from './lib/types';
 import type { ImportProgress } from './lib/importProgress';
-import { isLargeFile } from './lib/importProgress';
+import { clampProgress, isLargeFile, type ImportStage } from './lib/importProgress';
 import { parseFile } from './lib/parser';
 import { LARGE_XLSX_CONVERTER_URL, shouldOfferLargeXlsxConversion } from './lib/largeExcel';
 import { technicalDetails, type ImportDebugContext } from './lib/importDiagnostics';
@@ -62,6 +62,11 @@ function App() {
   } | null>(null);
   const [stalled, setStalled] = useState(false);
   const worker = useRef<Worker | null>(null);
+  const activeConversion = useRef<{
+    id: number;
+    xhr: XMLHttpRequest | null;
+    reader: FileReader | null;
+  }>({ id: 0, xhr: null, reader: null });
   const lastProgress = useRef(0);
   useEffect(() => {
     if (!progress) return;
@@ -433,93 +438,316 @@ function App() {
   }
 
   async function convertLargeWorkbook(f: File) {
+    const conversionId = activeConversion.current.id + 1;
+    activeConversion.current.id = conversionId;
+    activeConversion.current.xhr?.abort();
+    activeConversion.current.reader?.abort();
     setConversionPrompt(null);
     setErr(null);
     setFileMeta({ name: f.name, size: f.size });
     lastProgress.current = Date.now();
-    setProgress({
-      stage: 'Reading file',
-      percent: 5,
-      rowsExamined: 0,
-      rowsImported: 0,
-      rowsSkipped: 0,
-      largeFileMode: true,
-      message: 'Uploading workbook',
-    });
-    try {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(
-        () => controller.abort(),
-        Number(import.meta.env.VITE_LARGE_XLSX_CONVERTER_TIMEOUT_MS || 120000),
-      );
-      const response = await fetch(LARGE_XLSX_CONVERTER_URL, {
-        method: 'POST',
-        body: f,
-        signal: controller.signal,
-        headers: {
-          'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        },
-      });
-      window.clearTimeout(timeout);
-      if (!response.ok) {
-        let message = 'The workbook could not be converted.';
-        try {
-          message = (await response.json()).error || message;
-        } catch {
-          message = message || 'The workbook could not be converted.';
-        }
-        throw new Error(message);
-      }
+    const diagnostics: Record<string, unknown> = {
+      endpointUrl: LARGE_XLSX_CONVERTER_URL,
+      workbookFilename: f.name,
+      totalBytes: f.size,
+      bytesReadLocally: 0,
+      bytesUploaded: 0,
+      httpStatus: 'not received',
+      elapsedUploadMs: 0,
+      conversionStartReceived: false,
+      responseSize: 0,
+      abortReason: '',
+    };
+    const setConversionProgress = (
+      stage: ImportStage,
+      fraction: number,
+      message: string,
+      extra: Partial<ImportProgress> = {},
+    ) => {
+      if (activeConversion.current.id !== conversionId) return;
+      lastProgress.current = Date.now();
+      setStalled(false);
       setProgress((p) =>
         monotonic(p, {
-          stage: 'Opening workbook',
-          percent: 30,
+          stage,
+          percent: clampProgress(p?.percent ?? 0, stage, fraction),
           rowsExamined: 0,
           rowsImported: 0,
           rowsSkipped: 0,
           largeFileMode: true,
-          message: 'Downloading CSV',
+          message,
+          totalBytes: f.size,
+          ...extra,
         }),
       );
-      const blob = await response.blob();
-      setProgress((p) =>
-        monotonic(p, {
-          stage: 'Detecting worksheets and headers',
-          percent: 35,
-          rowsExamined: 0,
-          rowsImported: 0,
-          rowsSkipped: 0,
-          largeFileMode: true,
-          message: 'Preparing analysis',
-        }),
-      );
-      const csvFile = new File([blob], f.name.replace(/\.xlsx$/i, '.csv'), { type: 'text/csv' });
-      const data = await parseFile(csvFile, {
-        largeFileMode: true,
-        onProgress: (p) => setProgress((prev) => monotonic(prev, { ...p, largeFileMode: true })),
-      });
-      data.filename = f.name;
-      data.diagnostics.filename = f.name;
-      setData(data);
-      setProgress(null);
-      setFileMeta(null);
-    } catch (e) {
-      const aborted = e instanceof DOMException && e.name === 'AbortError';
+    };
+    const fail = (stage: ImportStage, message: string, error?: unknown) => {
+      if (activeConversion.current.id !== conversionId) return;
+      diagnostics.abortReason ||= message;
+      activeConversion.current.xhr = null;
+      activeConversion.current.reader = null;
       setErr({
-        stage: aborted ? 'Converting worksheet' : 'Opening workbook',
-        message: aborted
-          ? 'The conversion timed out. Please try again or choose another file.'
-          : friendly(e instanceof Error ? e.message : String(e)),
-        details: e instanceof Error ? e.stack || e.message : String(e),
+        stage,
+        message,
+        details: conversionTechnicalDetails(diagnostics, error),
         rowsProcessed: 0,
         canCompatibility: false,
         file: f,
       });
       setProgress(null);
+    };
+    setProgress({
+      stage: 'Reading file',
+      percent: 0,
+      rowsExamined: 0,
+      rowsImported: 0,
+      rowsSkipped: 0,
+      largeFileMode: true,
+      message: 'Reading file locally',
+      bytesRead: 0,
+      totalBytes: f.size,
+    });
+    try {
+      await readLocalFileForProgress(f, conversionId, diagnostics, setConversionProgress);
+      if (activeConversion.current.id !== conversionId) return;
+      await uploadWorkbookWithProgress(f, conversionId, diagnostics, setConversionProgress);
+      if (activeConversion.current.id !== conversionId) return;
+      setConversionProgress('Importing CSV', 0, 'Importing CSV');
+      const blob = (diagnostics.csvBlob as Blob | undefined)!;
+      const csvFile = new File([blob], f.name.replace(/\.xlsx$/i, '.csv'), { type: 'text/csv' });
+      diagnostics.csvBlob = undefined as never;
+      const data = await parseFile(csvFile, {
+        largeFileMode: true,
+        onProgress: (p) => {
+          const fraction = Math.max(0, Math.min(1, p.percent / 100));
+          setConversionProgress('Importing CSV', fraction, p.message ?? 'Importing CSV', {
+            rowsExamined: p.rowsExamined,
+            rowsImported: p.rowsImported,
+            rowsSkipped: p.rowsSkipped,
+            currentWorksheet: p.currentWorksheet,
+          });
+        },
+      });
+      if (activeConversion.current.id !== conversionId) return;
+      data.filename = f.name;
+      data.diagnostics.filename = f.name;
+      setConversionProgress('Complete', 1, 'Complete');
+      setData(data);
+      setProgress(null);
+      setFileMeta(null);
+      activeConversion.current.xhr = null;
+      activeConversion.current.reader = null;
+    } catch (e) {
+      const stage =
+        diagnostics.abortReason === 'upload-inactivity-timeout'
+          ? 'Uploading workbook'
+          : 'Converting Digital Sales worksheet';
+      fail(stage, friendlyConversionError(e, diagnostics.abortReason), e);
     }
   }
 
+  function readLocalFileForProgress(
+    f: File,
+    conversionId: number,
+    diagnostics: Record<string, unknown>,
+    onProgress: (
+      stage: ImportStage,
+      fraction: number,
+      message: string,
+      extra?: Partial<ImportProgress>,
+    ) => void,
+  ) {
+    const timeoutMs = Number(import.meta.env.VITE_LARGE_XLSX_LOCAL_READ_TIMEOUT_MS || 30000);
+    return new Promise<void>((resolve, reject) => {
+      const reader = new FileReader();
+      activeConversion.current.reader = reader;
+      const timer = window.setTimeout(() => {
+        diagnostics.abortReason = 'local-file-read-timeout';
+        reader.abort();
+        reject(new Error('Reading the local workbook timed out before upload could begin.'));
+      }, timeoutMs);
+      reader.onprogress = (e) => {
+        const loaded = e.loaded || 0;
+        diagnostics.bytesReadLocally = loaded;
+        onProgress(
+          'Reading file',
+          f.size ? loaded / f.size : 1,
+          `Reading file locally (${formatBytes(loaded)} of ${formatBytes(f.size)})`,
+          {
+            bytesRead: loaded,
+          },
+        );
+      };
+      reader.onerror = () =>
+        reject(reader.error || new Error('The workbook could not be read locally.'));
+      reader.onabort = () => reject(new Error('Reading the local workbook was cancelled.'));
+      reader.onload = () => {
+        window.clearTimeout(timer);
+        diagnostics.bytesReadLocally = Math.min(f.size, 64 * 1024);
+        activeConversion.current.reader = null;
+        const bytesRead = Math.min(f.size, 64 * 1024);
+        onProgress('Uploading workbook', 0, `Uploading workbook (0 B of ${formatBytes(f.size)})`, {
+          bytesRead,
+          bytesUploaded: 0,
+        });
+        resolve();
+      };
+      // Read a tiny slice only to prove the browser can access the file without keeping a full XLSX copy.
+      reader.readAsArrayBuffer(f.slice(0, Math.min(f.size, 64 * 1024)));
+    });
+  }
+
+  function uploadWorkbookWithProgress(
+    f: File,
+    conversionId: number,
+    diagnostics: Record<string, unknown>,
+    onProgress: (
+      stage: ImportStage,
+      fraction: number,
+      message: string,
+      extra?: Partial<ImportProgress>,
+    ) => void,
+  ) {
+    const inactivityMs = Number(
+      import.meta.env.VITE_LARGE_XLSX_UPLOAD_INACTIVITY_TIMEOUT_MS || 30000,
+    );
+    const responseMs = Number(import.meta.env.VITE_LARGE_XLSX_RESPONSE_TIMEOUT_MS || 120000);
+    const totalMs = Number(
+      import.meta.env.VITE_LARGE_XLSX_TOTAL_TIMEOUT_MS ||
+        import.meta.env.VITE_LARGE_XLSX_CONVERTER_TIMEOUT_MS ||
+        180000,
+    );
+    return new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      activeConversion.current.xhr = xhr;
+      const started = Date.now();
+      let lastUploaded = 0;
+      let inactivityTimer = 0;
+      let responseTimer = 0;
+      const resetInactivity = () => {
+        window.clearTimeout(inactivityTimer);
+        inactivityTimer = window.setTimeout(() => {
+          diagnostics.abortReason = 'upload-inactivity-timeout';
+          xhr.abort();
+          reject(
+            new Error(
+              'No upload progress was reported for 30 seconds. The request was aborted so you can retry.',
+            ),
+          );
+        }, inactivityMs);
+      };
+      const totalTimer = window.setTimeout(() => {
+        diagnostics.abortReason = 'total-conversion-timeout';
+        xhr.abort();
+        reject(new Error('The total conversion timeout elapsed.'));
+      }, totalMs);
+      xhr.timeout = responseMs;
+      xhr.upload.onprogress = (e) => {
+        const uploaded = e.loaded || lastUploaded;
+        if (uploaded > lastUploaded) resetInactivity();
+        lastUploaded = uploaded;
+        diagnostics.bytesUploaded = uploaded;
+        diagnostics.elapsedUploadMs = Date.now() - started;
+        onProgress(
+          'Uploading workbook',
+          f.size ? uploaded / f.size : 1,
+          `Uploading workbook (${formatBytes(uploaded)} of ${formatBytes(f.size)})`,
+          {
+            bytesUploaded: uploaded,
+          },
+        );
+      };
+      xhr.upload.onload = () => {
+        window.clearTimeout(inactivityTimer);
+        diagnostics.bytesUploaded = f.size;
+        diagnostics.elapsedUploadMs = Date.now() - started;
+        onProgress('Server received workbook', 1, 'Server received workbook', {
+          bytesUploaded: f.size,
+        });
+        responseTimer = window.setTimeout(() => {
+          diagnostics.abortReason = 'converter-response-timeout';
+          xhr.abort();
+          reject(new Error('The converter did not return a CSV within the response timeout.'));
+        }, responseMs);
+      };
+      xhr.onreadystatechange = () => {
+        if (
+          xhr.readyState >= XMLHttpRequest.HEADERS_RECEIVED &&
+          !diagnostics.conversionStartReceived
+        ) {
+          diagnostics.httpStatus = xhr.status;
+          diagnostics.conversionStartReceived =
+            xhr.getResponseHeader('x-conversion-started') === 'true';
+          onProgress(
+            'Converting Digital Sales worksheet',
+            0.2,
+            'Converting Digital Sales worksheet',
+          );
+        }
+      };
+      xhr.onprogress = (e) => {
+        if (xhr.status) diagnostics.httpStatus = xhr.status;
+        const loaded = e.loaded || 0;
+        diagnostics.responseSize = loaded;
+        onProgress(
+          'Downloading CSV',
+          e.lengthComputable ? loaded / e.total : 0.5,
+          `Downloading CSV (${formatBytes(loaded)})`,
+          {
+            responseBytes: loaded,
+          },
+        );
+      };
+      xhr.onload = () => {
+        window.clearTimeout(totalTimer);
+        window.clearTimeout(inactivityTimer);
+        window.clearTimeout(responseTimer);
+        diagnostics.httpStatus = xhr.status;
+        diagnostics.responseSize = xhr.response?.size ?? 0;
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(
+            new Error(
+              xhr.response?.size
+                ? 'The converter rejected the workbook.'
+                : `Converter HTTP ${xhr.status}`,
+            ),
+          );
+          return;
+        }
+        diagnostics.csvBlob = xhr.response;
+        onProgress(
+          'Downloading CSV',
+          1,
+          `Downloading CSV (${formatBytes(xhr.response?.size ?? 0)})`,
+          { responseBytes: xhr.response?.size ?? 0 },
+        );
+        resolve();
+      };
+      xhr.onerror = () =>
+        reject(new Error('The workbook upload failed before the converter returned a response.'));
+      xhr.ontimeout = () => {
+        diagnostics.abortReason = 'converter-response-timeout';
+        reject(new Error('The converter response timed out.'));
+      };
+      xhr.onabort = () =>
+        reject(new Error(String(diagnostics.abortReason || 'conversion-cancelled')));
+      xhr.open('POST', LARGE_XLSX_CONVERTER_URL);
+      xhr.responseType = 'blob';
+      xhr.setRequestHeader(
+        'content-type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      resetInactivity();
+      xhr.send(f);
+    });
+  }
+
   function cancel(clear = true) {
+    activeConversion.current.id += 1;
+    activeConversion.current.reader?.abort();
+    activeConversion.current.xhr?.abort();
+    activeConversion.current.reader = null;
+    activeConversion.current.xhr = null;
     worker.current?.terminate();
     worker.current = null;
     if (clear) {
@@ -591,6 +819,24 @@ function debugContext(
 }
 function monotonic(prev: ImportProgress | null, next: ImportProgress) {
   return { ...next, percent: Math.max(prev?.percent ?? 0, next.percent) };
+}
+function conversionTechnicalDetails(diagnostics: Record<string, unknown>, error?: unknown) {
+  return [
+    ...Object.entries(diagnostics)
+      .filter(([key]) => key !== 'csvBlob')
+      .map(([key, value]) => `${key}: ${String(value)}`),
+    `error: ${error instanceof Error ? error.message : String(error ?? 'none')}`,
+  ].join('\n');
+}
+function friendlyConversionError(error: unknown, reason: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (reason === 'upload-inactivity-timeout')
+    return 'No upload progress was reported for 30 seconds, so the upload was aborted. Please check your connection and retry.';
+  if (/timeout/i.test(message))
+    return `${message} Please retry or use a dedicated conversion service/object-storage upload endpoint.`;
+  if (/413|larger|too large/i.test(message))
+    return 'The converter endpoint cannot accept this workbook size. Use a conversion service or direct object-storage upload configured for at least 50 MB XLSX files.';
+  return friendly(message);
 }
 function friendly(message: string) {
   if (/memory|allocation/i.test(message))
@@ -679,6 +925,21 @@ function Upload(p: {
             <dd>{p.progress.stage}</dd>
             <dt>Progress percentage</dt>
             <dd>{p.progress.percent}%</dd>
+            {p.progress.totalBytes !== undefined && (
+              <>
+                <dt>Bytes read locally</dt>
+                <dd>
+                  {formatBytes(p.progress.bytesRead ?? 0)} of {formatBytes(p.progress.totalBytes)}
+                </dd>
+                <dt>Bytes uploaded</dt>
+                <dd>
+                  {formatBytes(p.progress.bytesUploaded ?? 0)} of{' '}
+                  {formatBytes(p.progress.totalBytes)}
+                </dd>
+                <dt>Response size</dt>
+                <dd>{formatBytes(p.progress.responseBytes ?? 0)}</dd>
+              </>
+            )}
             <dt>Rows examined</dt>
             <dd>{p.progress.rowsExamined}</dd>
             <dt>Rows imported</dt>
