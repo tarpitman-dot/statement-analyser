@@ -1603,3 +1603,36 @@ describe('complete ZIP breakdown export', () => {
     expect(createZip(entries).length).toBeGreaterThan(1000);
   });
 });
+
+describe('large XLSX converter workflow', () => {
+  it('keeps small XLSX in browser and offers conversion for large XLSX', async () => {
+    const { shouldOfferLargeXlsxConversion } = await import('./largeExcel');
+    expect(shouldOfferLargeXlsxConversion({ name: 'small.xlsx', size: 1000 }).shouldConvert).toBe(
+      false,
+    );
+    expect(
+      shouldOfferLargeXlsxConversion({ name: 'large.xlsx', size: 11 * 1024 * 1024 }).shouldConvert,
+    ).toBe(true);
+    expect(
+      shouldOfferLargeXlsxConversion({ name: 'large.csv', size: 50 * 1024 * 1024 }).shouldConvert,
+    ).toBe(false);
+  });
+
+  it('browser automatically imports returned CSV with exact identifiers and reconciled totals', async () => {
+    const { parseCsvFileStreaming } = await import('./streamingCsvParser');
+    const csv = toCsv([Object.fromEntries(headers.map((h, i) => [h, row[i]]))], headers);
+    const data = await parseCsvFileStreaming({
+      name: 'converted.csv',
+      size: csv.length,
+      stream: () => new Response(csv).body,
+    } as File);
+    expect(data.rows[0].barcode).toBe('1234567890123');
+    expect(data.rows[0].catalogNumber).toBe('CAT-001');
+    expect(data.rows[0].releaseCode).toBe('R1');
+    expect(data.rows[0].isrc).toBe('ISRC1');
+    expect(totals(data.rows).royaltyAmount.toString()).toBe(
+      data.diagnostics.initialSummary?.totalRoyaltyAmount,
+    );
+    expect(groupedReconciliation(data.rows, groupArtists(data.rows)).reconciled).toBe(true);
+  });
+});

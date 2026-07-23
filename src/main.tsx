@@ -35,6 +35,7 @@ import type { StatementData, Transaction } from './lib/types';
 import type { ImportProgress } from './lib/importProgress';
 import { isLargeFile } from './lib/importProgress';
 import { parseFile } from './lib/parser';
+import { LARGE_XLSX_CONVERTER_URL, shouldOfferLargeXlsxConversion } from './lib/largeExcel';
 import { technicalDetails, type ImportDebugContext } from './lib/importDiagnostics';
 import './styles.css';
 const tabs = [
@@ -55,6 +56,10 @@ function App() {
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [fileMeta, setFileMeta] = useState<{ name: string; size: number } | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [conversionPrompt, setConversionPrompt] = useState<{
+    file: File;
+    estimatedRows?: number;
+  } | null>(null);
   const [stalled, setStalled] = useState(false);
   const worker = useRef<Worker | null>(null);
   const lastProgress = useRef(0);
@@ -68,6 +73,14 @@ function App() {
   }, [progress]);
   async function load(f: File) {
     cancel(false);
+    const largeXlsx = shouldOfferLargeXlsxConversion(f);
+    if (largeXlsx.shouldConvert) {
+      setErr(null);
+      setProgress(null);
+      setFileMeta({ name: f.name, size: f.size });
+      setConversionPrompt({ file: f, estimatedRows: largeXlsx.estimatedRows });
+      return;
+    }
     setErr(null);
     setFileMeta({ name: f.name, size: f.size });
     lastProgress.current = Date.now();
@@ -418,6 +431,94 @@ function App() {
       setProgress(null);
     }
   }
+
+  async function convertLargeWorkbook(f: File) {
+    setConversionPrompt(null);
+    setErr(null);
+    setFileMeta({ name: f.name, size: f.size });
+    lastProgress.current = Date.now();
+    setProgress({
+      stage: 'Reading file',
+      percent: 5,
+      rowsExamined: 0,
+      rowsImported: 0,
+      rowsSkipped: 0,
+      largeFileMode: true,
+      message: 'Uploading workbook',
+    });
+    try {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        Number(import.meta.env.VITE_LARGE_XLSX_CONVERTER_TIMEOUT_MS || 120000),
+      );
+      const response = await fetch(LARGE_XLSX_CONVERTER_URL, {
+        method: 'POST',
+        body: f,
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        },
+      });
+      window.clearTimeout(timeout);
+      if (!response.ok) {
+        let message = 'The workbook could not be converted.';
+        try {
+          message = (await response.json()).error || message;
+        } catch {
+          message = message || 'The workbook could not be converted.';
+        }
+        throw new Error(message);
+      }
+      setProgress((p) =>
+        monotonic(p, {
+          stage: 'Opening workbook',
+          percent: 30,
+          rowsExamined: 0,
+          rowsImported: 0,
+          rowsSkipped: 0,
+          largeFileMode: true,
+          message: 'Downloading CSV',
+        }),
+      );
+      const blob = await response.blob();
+      setProgress((p) =>
+        monotonic(p, {
+          stage: 'Detecting worksheets and headers',
+          percent: 35,
+          rowsExamined: 0,
+          rowsImported: 0,
+          rowsSkipped: 0,
+          largeFileMode: true,
+          message: 'Preparing analysis',
+        }),
+      );
+      const csvFile = new File([blob], f.name.replace(/\.xlsx$/i, '.csv'), { type: 'text/csv' });
+      const data = await parseFile(csvFile, {
+        largeFileMode: true,
+        onProgress: (p) => setProgress((prev) => monotonic(prev, { ...p, largeFileMode: true })),
+      });
+      data.filename = f.name;
+      data.diagnostics.filename = f.name;
+      setData(data);
+      setProgress(null);
+      setFileMeta(null);
+    } catch (e) {
+      const aborted = e instanceof DOMException && e.name === 'AbortError';
+      setErr({
+        stage: aborted ? 'Converting worksheet' : 'Opening workbook',
+        message: aborted
+          ? 'The conversion timed out. Please try again or choose another file.'
+          : friendly(e instanceof Error ? e.message : String(e)),
+        details: e instanceof Error ? e.stack || e.message : String(e),
+        rowsProcessed: 0,
+        canCompatibility: false,
+        file: f,
+      });
+      setProgress(null);
+    }
+  }
+
   function cancel(clear = true) {
     worker.current?.terminate();
     worker.current = null;
@@ -426,6 +527,7 @@ function App() {
       setFileMeta(null);
       setErr(null);
       setStalled(false);
+      setConversionPrompt(null);
     }
   }
   return (
@@ -441,6 +543,8 @@ function App() {
           stalled={stalled}
           elapsed={elapsed}
           cancel={() => cancel(true)}
+          conversionPrompt={conversionPrompt}
+          onConvert={convertLargeWorkbook}
         />
       ) : (
         <Dashboard data={data} remove={() => setData(undefined)} />
@@ -505,7 +609,39 @@ function Upload(p: {
   stalled: boolean;
   elapsed: number;
   cancel: () => void;
+  conversionPrompt: { file: File; estimatedRows?: number } | null;
+  onConvert: (f: File) => void;
 }) {
+  if (p.conversionPrompt && p.file)
+    return (
+      <main className="upload">
+        <section className="processing">
+          <h1>This Excel statement is too large to analyse safely in your browser.</h1>
+          <p>Would you like us to convert it to CSV automatically?</p>
+          <dl>
+            <dt>Filename</dt>
+            <dd>{p.file.name}</dd>
+            <dt>File size</dt>
+            <dd>{formatBytes(p.file.size)}</dd>
+            <dt>Estimated rows</dt>
+            <dd>{p.conversionPrompt.estimatedRows ?? 'Not available from preflight'}</dd>
+          </dl>
+          <aside className="privacy compact-privacy">
+            <p>Large Excel files can optionally be converted to CSV on our secure server.</p>
+            <p>
+              The original Excel file is used only to create a CSV of the Digital Sales worksheet
+              and is deleted immediately afterwards.
+            </p>
+            <p>No statement analysis is performed on the server.</p>
+            <p>All summaries and calculations continue to happen locally in your browser.</p>
+          </aside>
+          <button onClick={() => p.onConvert(p.conversionPrompt!.file)}>
+            Convert and continue
+          </button>
+          <button onClick={p.cancel}>Cancel</button>
+        </section>
+      </main>
+    );
   if (p.progress && p.file)
     return (
       <main className="upload">
