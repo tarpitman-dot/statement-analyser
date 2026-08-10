@@ -968,21 +968,30 @@ describe('barcode-first release grouping regressions', () => {
     expect(groups).toHaveLength(2);
     expect(groups.map((g) => g.barcode).sort()).toEqual(['BC-A', 'BC-B']);
   });
-  it('falls back to Catalog Number when Barcode is blank', () => {
+  it('falls back to Release Code before Catalog Number when Barcode is blank', () => {
     const groups = groupReleases([
       make({ barcode: '', catalogNumber: 'CAT-FALLBACK', releaseCode: 'R1' }),
       make({ barcode: '', catalogNumber: 'CAT-FALLBACK', releaseCode: 'R2' }),
     ]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].catalogNumber).toBe('CAT-FALLBACK');
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.releaseCode).sort()).toEqual(['R1', 'R2']);
   });
-  it('falls back to Release Code when Barcode and Catalog Number are blank', () => {
+  it('falls back to Release Code when Barcode is blank', () => {
     const groups = groupReleases([
       make({ barcode: '', catalogNumber: '', releaseCode: 'RC-FALLBACK', albumTitle: 'A' }),
       make({ barcode: '', catalogNumber: '', releaseCode: 'RC-FALLBACK', albumTitle: 'B' }),
     ]);
     expect(groups).toHaveLength(1);
     expect(groups[0].releaseCode).toBe('RC-FALLBACK');
+  });
+
+  it('falls back to Catalog Number when Barcode and Release Code are blank', () => {
+    const groups = groupReleases([
+      make({ barcode: '', releaseCode: '', catalogNumber: 'CAT-FALLBACK', albumTitle: 'A' }),
+      make({ barcode: '', releaseCode: '', catalogNumber: 'CAT-FALLBACK', albumTitle: 'B' }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].catalogNumber).toBe('CAT-FALLBACK');
   });
   it('uses Artist and Album Title as the final fallback', () => {
     const groups = groupReleases([
@@ -1148,6 +1157,36 @@ describe('overview chart data regressions', () => {
 });
 
 describe('barcode integrity and statement health', () => {
+  it('fails an import when 13-digit barcodes show likely precision-collapse corruption', () => {
+    const corrupted = Array.from({ length: 24 }, (_, index) => {
+      const item = [...row];
+      item[5] = `Distinct Album ${index}`;
+      item[6] = `CAT-${index}`;
+      item[7] = ['5056320000000', '5056690000000', '5055870000000'][index % 3];
+      item[9] = `Distinct Artist ${index}`;
+      return item;
+    });
+    expect(() => parseWorkbook(wb([headers, ...corrupted]), 'corrupted.xlsx')).toThrow(
+      /likely barcode precision loss/i,
+    );
+  });
+
+  it('keeps similar exact 13-digit barcodes as separate releases', () => {
+    const barcodes = ['5055869508216', '5055869508353', '5055869508407', '5055869517324'];
+    const exactRows = barcodes.map((barcode, index) => {
+      const item = [...row];
+      item[5] = `Album ${index}`;
+      item[6] = `CAT-${index}`;
+      item[7] = barcode;
+      item[9] = `Artist ${index}`;
+      return item;
+    });
+    const statement = parseWorkbook(wb([headers, ...exactRows]), 'exact-barcodes.xlsx');
+    expect(statement.rows.map((item) => item.barcode)).toEqual(barcodes);
+    expect(groupReleases(statement.rows)).toHaveLength(barcodes.length);
+    expect(statement.diagnostics.initialSummary?.uniqueReleaseCount).toBe(barcodes.length);
+  });
+
   it('clean statement shows intact Excellent health with no barcode warnings', () => {
     const s = parseWorkbook(wb([headers, row]));
     expect(s.diagnostics.statementHealth.fileStatus).toBe('Original statement appears intact');
@@ -1171,7 +1210,9 @@ describe('barcode integrity and statement health', () => {
     const malformed = [...row];
     malformed[7] = '12345ABC';
     const s = parseWorkbook(wb([headers, malformed]));
-    expect(s.diagnostics.barcodeIntegrity.warnings.some((w) => w.warning === 'Malformed barcode')).toBe(true);
+    expect(
+      s.diagnostics.barcodeIntegrity.warnings.some((w) => w.warning === 'Malformed barcode'),
+    ).toBe(true);
     expect(s.diagnostics.statementHealth.dataQuality).toBe('Review recommended');
     expect(s.diagnostics.statementHealth.rowsRequiringReview).toBe(1);
   });
