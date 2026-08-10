@@ -221,27 +221,38 @@ type ReleaseBarcodeDiagnostics = {
   rawBarcodes: Set<string>;
   rows: BarcodeRowRef[];
 };
+type BarcodeImportState = {
+  unique: Set<string>;
+  lengthRows: Map<number, BarcodeRowRef[]>;
+  releaseFormats: Map<string, ReleaseBarcodeDiagnostics>;
+  releaseSignaturesByBarcode: Map<string, Set<string>>;
+  thirteenDigitRows: number;
+  suspiciousZeroSuffixRows: number;
+};
 function releaseSignature(r: Transaction) {
   return [r.artist, r.albumTitle, r.catalogNumber, r.releaseCode].join('|').toLowerCase();
 }
 export function collectBarcodeDiagnostics(
   r: Transaction,
-  state: {
-    unique: Set<string>;
-    lengthRows: Map<number, BarcodeRowRef[]>;
-    releaseFormats: Map<string, ReleaseBarcodeDiagnostics>;
-  },
+  state: BarcodeImportState,
   d: ImportDiagnostics,
 ) {
   if (r.barcode) {
     d.barcodeIntegrity.populatedBarcodeRows++;
     state.unique.add(r.barcode);
+    if (/^\d{13}$/.test(r.barcode)) {
+      state.thirteenDigitRows++;
+      if (/0{6,}$/.test(r.barcode)) state.suspiciousZeroSuffixRows++;
+    }
     if (/^\d+$/.test(r.barcode)) {
       const refs = state.lengthRows.get(r.barcode.length) ?? [];
       refs.push({ sourceSheet: r.sourceSheet, sourceRow: r.sourceRow, barcode: r.barcode });
       state.lengthRows.set(r.barcode.length, refs);
     }
     const sig = releaseSignature(r);
+    const barcodeSignatures = state.releaseSignaturesByBarcode.get(r.barcode) ?? new Set<string>();
+    barcodeSignatures.add(sig);
+    state.releaseSignaturesByBarcode.set(r.barcode, barcodeSignatures);
     if (sig.trim()) {
       let group = state.releaseFormats.get(sig);
       if (!group) {
@@ -254,16 +265,25 @@ export function collectBarcodeDiagnostics(
     }
   } else d.barcodeIntegrity.blankBarcodeRows++;
 }
-function finaliseBarcodeDiagnostics(
-  state: {
-    unique: Set<string>;
-    lengthRows: Map<number, BarcodeRowRef[]>;
-    releaseFormats: Map<string, ReleaseBarcodeDiagnostics>;
-  },
-  d: ImportDiagnostics,
-) {
+function finaliseBarcodeDiagnostics(state: BarcodeImportState, d: ImportDiagnostics) {
   const b = d.barcodeIntegrity;
   b.uniqueBarcodeCount = state.unique.size;
+  const zeroSuffixRatio = state.thirteenDigitRows
+    ? state.suspiciousZeroSuffixRows / state.thirteenDigitRows
+    : 0;
+  const collapsedValues = [...state.releaseSignaturesByBarcode.values()].filter(
+    (signatures) => signatures.size >= 5,
+  ).length;
+  if (
+    state.thirteenDigitRows >= 20 &&
+    zeroSuffixRatio >= 0.5 &&
+    state.unique.size <= Math.max(5, Math.ceil(state.thirteenDigitRows / 20)) &&
+    collapsedValues > 0
+  ) {
+    throw new Error(
+      'Import stopped: likely barcode precision loss was detected. Many 13-digit barcodes were reduced to a few values ending in long strings of zeroes. Re-export the source with Barcode stored as text and try again.',
+    );
+  }
   if (state.lengthRows.size > 1) {
     for (const refs of state.lengthRows.values())
       for (const r of refs)
@@ -313,6 +333,7 @@ function finaliseBarcodeDiagnostics(
   state.unique.clear();
   state.lengthRows.clear();
   state.releaseFormats.clear();
+  state.releaseSignaturesByBarcode.clear();
 }
 export function parseRoyaltyRate(value: unknown) {
   if (value === null || value === undefined) return null;
@@ -513,6 +534,9 @@ export function parseWorkbook(
     unique: new Set<string>(),
     lengthRows: new Map<number, BarcodeRowRef[]>(),
     releaseFormats: new Map<string, ReleaseBarcodeDiagnostics>(),
+    releaseSignaturesByBarcode: new Map<string, Set<string>>(),
+    thirteenDigitRows: 0,
+    suspiciousZeroSuffixRows: 0,
   };
   const diag: ImportDiagnostics = {
     filename,

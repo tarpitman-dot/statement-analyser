@@ -87,6 +87,12 @@ function csvEscape(value) {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+// Cell <v> contents are already the workbook's underlying value. Keep them as text: converting
+// through JavaScript numbers (or using formatted <w> display values) corrupts identifiers.
+function exactCellValue(valueXml) {
+  return decodeXml(valueXml);
+}
+
 function columnIndex(ref = '') {
   const letters = (ref.match(/^[A-Z]+/i)?.[0] || '').toUpperCase();
   let n = 0;
@@ -281,7 +287,7 @@ async function streamWorksheetCsv(zip, worksheetPath, shared, res) {
         if (a.t === 's') value = await sharedAt(shared, Number(v));
         else if (a.t === 'inlineStr') value = inline;
         else if (a.t === 'b') value = v === '1' ? 'TRUE' : v === '0' ? 'FALSE' : v;
-        else value = decodeXml(v);
+        else value = exactCellValue(v);
         row[col] = value;
       }
       await writeResponse(res, `${row.map(csvEscape).join(',')}\n`);

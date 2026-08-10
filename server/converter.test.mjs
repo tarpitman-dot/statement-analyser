@@ -90,6 +90,31 @@ describe('converter service', () => {
     expect(res.body).toContain('0012345678901,CAT-001');
   });
 
+  it('preserves distinct 13-digit numeric barcodes with a shared prefix', async () => {
+    const barcodes = ['5055869508216', '5055869508353', '5055869508407', '5055869517324'];
+    const res = await convert(
+      bytes('Digital Sales', [
+        ['Barcode', 'Catalog Number', 'Release Code', 'ISRC', 'Artist', 'Album Title'],
+        ...barcodes.map((barcode, index) => [
+          Number(barcode),
+          `CAT-${index}`,
+          `REL-${index}`,
+          `ISRC-${index}`,
+          `Artist ${index}`,
+          `Album ${index}`,
+        ]),
+      ]),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(
+      res.body
+        .split('\n')
+        .slice(1, 5)
+        .map((line) => line.split(',')[0]),
+    ).toEqual(barcodes);
+    expect(res.body).not.toMatch(/5055869?0{6,}/);
+  });
+
   it('returns a CORS JSON error when Digital Sales is missing', async () => {
     const other = bytes('Other');
     const req = Readable.from([other]);
